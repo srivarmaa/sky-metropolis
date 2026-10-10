@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import { BuildingConfig, BuildingType } from './types';
+import { AssetTier, BuildingConfig, BuildingType } from './types';
 
 // Map Settings
 export const GRID_SIZE = 10;
@@ -33,6 +33,18 @@ export const PLAYER_COLORS = ['#22d3ee', '#f472b6', '#a3e635', '#fb923c', '#a78b
 export const DEMOLISH_COST = 5;
 export const PROPOSAL_TTL_MS = 60_000; // Unanswered proposals expire after a minute
 export const COMMUTE_TAX = 0.1; // Share of a commuter's output paid to their home city
+
+// Player-made monuments (see services/assets). Figures are per tile of the footprint, so bigger
+// monuments cost and earn proportionally more. Creators choose the tier but can't change the numbers.
+export const ASSET_TIERS: Record<AssetTier, { label: string; cost: number; tourism: number; popGen: number; upkeep: number; maxHeight: number }> = {
+  monument: { label: 'Monument', cost: 400, tourism: 20, popGen: 2, upkeep: 2, maxHeight: 3 },
+  grand: { label: 'Grand Monument', cost: 1200, tourism: 60, popGen: 5, upkeep: 6, maxHeight: 5 },
+};
+export const MAX_FOOTPRINT = 3; // Up to 3×3 tiles
+export const NOVELTY_DECAY = 0.5; // Each extra copy of the same monument in a city draws half as many tourists
+export const GAME_DAYS_PER_YEAR = 360;
+export const LICENCE_DAY_OPTIONS = [30, 90, 180, 360]; // 90 game days = "3 months"
+export const MAX_PROFIT_SHARE = 50; // Percent of a monument's tourism a creator may ask for
 
 export const BUILDINGS: Record<BuildingType, BuildingConfig> = {
   [BuildingType.None]: {
@@ -112,6 +124,16 @@ export const BUILDINGS: Record<BuildingType, BuildingConfig> = {
     description: 'River and lake between co-op cities',
     color: '#3b82f6',
     popGen: 0,
+    incomeGen: 0,
+    jobs: 0,
+  },
+  [BuildingType.Monument]: {
+    type: BuildingType.Monument,
+    cost: 400, // Per tile for the Monument tier; see ASSET_TIERS
+    name: 'Monument',
+    description: 'Build a landmark from your Asset Studio. Earns tourism and attracts residents; needs a road and upkeep.',
+    color: '#c084fc',
+    popGen: 0, // Handled per tier (ASSET_TIERS)
     incomeGen: 0,
     jobs: 0,
   },

@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Grid, BuildingType, CityStats, AIGoal, NewsItem, EconomyReport, TileData, CoopCity } from './types';
 import { GRID_SIZE, TICK_RATE_MS, INITIAL_MONEY } from './constants';
 import IsoMap from './components/IsoMap';
@@ -10,10 +10,15 @@ import UIOverlay from './components/UIOverlay';
 import StartScreen from './components/StartScreen';
 import CoopLobby from './components/CoopLobby';
 import { generateCityGoal, generateNewsEvent, isAiAvailable } from './services/geminiService';
-import { createEmptyGrid, downloadLayout } from './services/layoutFile';
+import { createEmptyGrid, downloadLayout, listMonuments } from './services/layoutFile';
 import { computeEconomy, computePopulation, findCityProblems, CityProblem, CITY_PROBLEM_NEWS, EMPTY_ECONOMY } from './services/economy';
 import { analyzeCity } from './services/city';
-import { tryBuild } from './services/build';
+import { tryBuild, tryBuildMonument } from './services/build';
+import AssetStudio from './components/AssetStudio';
+import { Library, loadLibrary } from './services/assets/library';
+import { AssetSpec, AssetTerms, DEFAULT_TERMS, monumentStats } from './services/assets/spec';
+import { licenceValid } from './services/coop/hostSim';
+import { RoomAsset } from './services/coop/protocol';
 import { useCoopGame } from './services/coop/useCoopGame';
 import { bridgeIsLinked } from './services/coop/hostSim';
 
@@ -182,12 +187,114 @@ function App() {
 
   // --- Interaction Logic ---
 
+  // --- Assets (monuments) ---
+  const [library, setLibrary] = useState<Library>({ entries: [], versions: {}, persistent: true });
+  const [showStudio, setShowStudio] = useState(false);
+  const [selectedAssetKey, setSelectedAssetKey] = useState<string | null>(null);
+  const [monumentRotation, setMonumentRotation] = useState(0);
+
+  const refreshLibrary = useCallback(async () => setLibrary(await loadLibrary()), []);
+  useEffect(() => { refreshLibrary(); }, [refreshLibrary]);
+
+  const roomAssets = Object.values(coop.assets) as RoomAsset[];
+  // Monuments you can build: your own designs, plus (in co-op) other players' assets you hold a valid licence for
+  const licensedAssets = coop.active && coop.mySlot !== null
+    ? roomAssets.filter(a => a.creator !== coop.mySlot
+      && coop.licences.some(l => l.assetId === a.id && l.holder === coop.mySlot && licenceValid(l, coop.day)))
+    : [];
+  const buildable: { key: string; id: string; spec: AssetSpec; terms: AssetTerms; mine: boolean }[] = [
+    ...library.entries.flatMap(e => (library.versions[e.id] ? [{ key: e.key, id: e.id, spec: library.versions[e.id], terms: e.terms, mine: true }] : [])),
+    ...licensedAssets.map(a => ({ key: `room:${a.id}`, id: a.id, spec: a.spec, terms: a.terms, mine: false })),
+  ];
+  const selected = buildable.find(b => b.key === selectedAssetKey) ?? buildable[0];
+  const selectedSpec = selected?.spec;
+  const placingRef = useRef<typeof selected | null>(null);
+  placingRef.current = selected ?? null;
+
+  // Everything this player can draw: their own library and whatever has been shared to the room
+  const drawableAssets = useMemo(() => ({
+    ...library.versions,
+    ...Object.fromEntries(roomAssets.map(a => [a.id, a.spec])),
+  }), [library.versions, coop.assets]);
+
+  // In co-op, picking one of your designs shares it with the room so it can be built there
+  const selectAsset = (key: string) => {
+    setSelectedAssetKey(key);
+    const pick = buildable.find(b => b.key === key);
+    if (coop.active && pick?.mine && !coop.assets[pick.id]) {
+      coop.shareAsset(pick.spec, pick.terms);
+    }
+  };
+
+  // Joining a saved world: offer to share your assets that its monuments use (players re-share each session)
+  const [shareDismissed, setShareDismissed] = useState(false);
+  const missingMine = coop.active
+    ? [...new Set(listMonuments(grid).map(m => m.assetId))].filter(id => !coop.assets[id] && library.versions[id])
+    : [];
+  const shareMissing = () => {
+    for (const id of missingMine) {
+      const entry = library.entries.find(e => e.id === id);
+      coop.shareAsset(library.versions[id], entry?.terms ?? DEFAULT_TERMS);
+    }
+  };
+
+  // Licensed monuments whose licence ran out (closed until renewed)
+  const closedMonuments = coop.active
+    ? listMonuments(grid).filter(m => {
+        const owner = grid[m.y]?.[m.x]?.owner;
+        const lic = coop.licences.find(l => l.assetId === m.assetId && l.holder === owner);
+        return !!lic && !licenceValid(lic, coop.day);
+      }).map(m => `${m.x},${m.y}`)
+    : [];
+  const rotationRef = useRef(monumentRotation);
+  rotationRef.current = monumentRotation;
+
+  // R rotates the monument being placed
+  useEffect(() => {
+    if (selectedTool !== BuildingType.Monument) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      if (e.key.toLowerCase() === 'r') setMonumentRotation(r => (r + 1) % 4);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedTool]);
+
   const handleTileClick = useCallback((x: number, y: number) => {
     if (!gameStarted) return; // Prevent clicking through start screen
 
     // Co-op: the host checks and applies every build (clients just send the request)
     if (coopRef.current.active) {
+      if (selectedTool === BuildingType.Monument) {
+        const placing = placingRef.current;
+        if (!placing) {
+          addNewsItem({ id: newsId(), text: 'Create a monument in the Asset Studio, or get a licence for one in the Asset Market.', type: 'neutral' });
+          return;
+        }
+        if (placing.mine && !coopRef.current.assets[placing.id]) coopRef.current.shareAsset(placing.spec, placing.terms);
+        coopRef.current.buildMonument(x, y, placing.id, rotationRef.current);
+        return;
+      }
       coopRef.current.requestBuild(x, y, selectedTool);
+      return;
+    }
+
+    // Monuments: place the chosen asset with its footprint's top-left corner here
+    if (selectedTool === BuildingType.Monument) {
+      const placing = placingRef.current;
+      if (!placing) {
+        addNewsItem({ id: newsId(), text: 'Create a monument in the Asset Studio first.', type: 'neutral' });
+        return;
+      }
+      const m = { assetId: placing.id, name: placing.spec.name, tier: placing.spec.tier, footprint: placing.spec.footprint, rotation: rotationRef.current };
+      const built = tryBuildMonument(gridRef.current, statsRef.current.money, x, y, m, null);
+      if (!built.ok) {
+        if (built.reason) addNewsItem({ id: newsId(), text: built.reason, type: 'negative' });
+        return;
+      }
+      applyTiles(built.tiles!);
+      setStats(prev => ({ ...prev, money: prev.money - built.cost! }));
+      addNewsItem({ id: newsId(), text: `${placing.spec.name} opened! Tourists are on their way.`, type: 'positive' });
       return;
     }
 
@@ -197,8 +304,8 @@ function App() {
       if (result.reason) addNewsItem({ id: newsId(), text: result.reason, type: 'negative' });
       return;
     }
-    applyTiles([result.tile]);
-    setStats(prev => ({ ...prev, money: prev.money - result.cost }));
+    applyTiles(result.tiles ?? [result.tile!]);
+    setStats(prev => ({ ...prev, money: prev.money - result.cost! }));
   }, [selectedTool, addNewsItem, gameStarted, applyTiles]);
 
   const handleClaimReward = () => {
@@ -250,9 +357,12 @@ function App() {
           ? {
               mySlot: coop.mySlot, plotSize: coop.plotSize, players: coop.players, cursors: coop.cursors,
               pendingBridges: coop.proposals.flatMap(p => (p.deal.kind === 'bridge' ? [p.deal.tiles] : [])),
+              closedMonuments,
             }
           : undefined}
         onHoverTile={coop.active ? coop.sendCursor : undefined}
+        assets={drawableAssets}
+        placing={selectedTool === BuildingType.Monument && selectedSpec ? { spec: selectedSpec, rotation: monumentRotation } : undefined}
       />
 
       {/* Start Screen / Co-op lobby */}
@@ -265,6 +375,7 @@ function App() {
           defaultGridSize={GRID_SIZE}
           onPreviewGrid={setWorld}
           onPlayWithFriends={() => setShowLobby(true)}
+          onOpenStudio={() => setShowStudio(true)}
         />
       ))}
 
@@ -281,6 +392,20 @@ function App() {
           aiEnabled={aiEnabled}
           onSaveLayout={handleSaveLayout}
           economy={shownEconomy}
+          onOpenStudio={() => setShowStudio(true)}
+          monuments={{
+            options: buildable.map(b => {
+              const lic = !b.mine && coop.mySlot !== null ? coop.licences.find(l => l.assetId === b.id && l.holder === coop.mySlot) : undefined;
+              const note = !coop.active ? undefined
+                : !b.mine ? `Licensed from ${coop.players.find(p => p.slot === coop.assets[b.id]?.creator)?.name ?? 'its creator'} · ${lic ? lic.expiresDay - coop.day : 0} days left`
+                : coop.assets[b.id] ? 'Yours · shared with the room' : 'Yours · picking it shares it with the room';
+              return { key: b.key, name: b.spec.name, tier: b.spec.tier, footprint: b.spec.footprint, cost: monumentStats(b.spec.tier, b.spec.footprint).cost, note };
+            }),
+            selectedKey: selected?.key ?? null,
+            onSelect: selectAsset,
+            rotation: monumentRotation,
+            onRotate: () => setMonumentRotation(r => (r + 1) % 4),
+          }}
           coop={coop.active && coop.mySlot !== null
             ? {
                 roomCode: coop.roomCode, players: coop.players, cities: coop.cities, mySlot: coop.mySlot, isHost: coop.role === 'host',
@@ -294,11 +419,38 @@ function App() {
                   onRespond: coop.respond,
                   onCancel: coop.cancel,
                   onPropose: coop.propose,
+                  assetName: (id: string) => coop.assets[id]?.spec.name ?? 'an asset',
+                },
+                market: {
+                  mySlot: coop.mySlot,
+                  players: coop.players,
+                  assets: roomAssets,
+                  licences: coop.licences,
+                  proposals: coop.proposals,
+                  day: coop.day,
+                  money: shownStats.money,
+                  onPropose: coop.propose,
                 },
               }
             : undefined}
         />
       )}
+
+      {gameStarted && missingMine.length > 0 && !shareDismissed && (
+        <div className="absolute top-24 md:top-20 left-1/2 -translate-x-1/2 z-40 max-w-sm w-[calc(100%-2rem)] bg-slate-900/95 border border-violet-500/50 rounded-xl p-3 text-white shadow-2xl" role="alert">
+          <p className="text-sm font-bold mb-1">Share your assets with the room?</p>
+          <p className="text-xs text-slate-300 mb-2.5">
+            This world has monuments built from {missingMine.length === 1 ? 'one of your designs' : `${missingMine.length} of your designs`}.
+            Share {missingMine.length === 1 ? 'it' : 'them'} so everyone sees {missingMine.length === 1 ? 'it' : 'them'} instead of scaffolding.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={shareMissing} className="text-xs font-bold px-3 py-1.5 rounded-md bg-violet-600 hover:bg-violet-500">Share {missingMine.length === 1 ? 'it' : `all ${missingMine.length}`}</button>
+            <button onClick={() => setShareDismissed(true)} className="text-xs font-bold px-3 py-1.5 rounded-md bg-slate-700 hover:bg-slate-600">Not now</button>
+          </div>
+        </div>
+      )}
+
+      {showStudio && <AssetStudio library={library} onLibraryChanged={refreshLibrary} onClose={() => setShowStudio(false)} />}
 
       {/* The host left: the world stays on screen and can be saved */}
       {coop.phase === 'ended' && (

@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import { BuildingType, CoopCity, CoopPlayer, Grid, TileData } from '../../types';
-import { BUILDINGS } from '../../constants';
-import { BridgeInfo, Deal, Proposal } from './protocol';
+import { BUILDINGS, LICENCE_DAY_OPTIONS, MAX_PROFIT_SHARE } from '../../constants';
+import { BridgeInfo, Deal, Licence, Proposal, RoomAsset } from './protocol';
 import { riverCrossing } from './world';
 
 /**
@@ -18,6 +18,9 @@ export interface DealWorld {
   cities: Record<number, CoopCity>;
   bridges: BridgeInfo[];
   players: CoopPlayer[];
+  assets: Record<string, RoomAsset>; // Shared with the room this session
+  licences: Licence[];
+  day: number; // Current game day
 }
 
 export const BRIDGE_SHARE = BUILDINGS[BuildingType.Bridge].cost; // Each side pays this
@@ -27,7 +30,8 @@ const pair = (a: number, b: number, x: number, y: number) => (a === x && b === y
 export const sameDeal = (d1: Deal, d2: Deal) => {
   if (d1.kind !== d2.kind) return false;
   if (d1.kind === 'bridge' && d2.kind === 'bridge') return d1.tiles.some(t => d2.tiles.some(u => u.x === t.x && u.y === t.y));
-  if (d1.kind !== 'bridge' && d2.kind !== 'bridge') return d1.bridgeId === d2.bridgeId;
+  if (d1.kind === 'asset_licence' && d2.kind === 'asset_licence') return d1.assetId === d2.assetId;
+  if ((d1.kind === 'remove_bridge' || d1.kind === 'bridge_commuting') && (d2.kind === 'remove_bridge' || d2.kind === 'bridge_commuting')) return d1.bridgeId === d2.bridgeId;
   return false;
 };
 
@@ -53,12 +57,38 @@ export const checkDeal = (w: DealWorld, from: number, to: number, deal: Deal): s
       if (deal.kind === 'bridge_commuting' && bridge.commuting === deal.open) return deal.open ? 'Commuters can already cross.' : 'The bridge is already closed to commuters.';
       return null;
     }
+    case 'asset_licence': {
+      const asset = w.assets[deal.assetId];
+      if (!asset) return 'That asset is no longer shared in the room.';
+      if (asset.creator !== from && asset.creator !== to) return 'Only the creator of an asset can license it.';
+      const holder = licenceHolder(w, from, to, deal);
+      if (!Number.isInteger(deal.price) || deal.price < 0 || deal.price > 1_000_000) return 'The price must be a whole number of dollars.';
+      if (!LICENCE_DAY_OPTIONS.includes(deal.days)) return `A licence lasts ${LICENCE_DAY_OPTIONS.join(', ')} days.`;
+      if (!Number.isInteger(deal.share) || deal.share < 0 || deal.share > MAX_PROFIT_SHARE) return `Profit share must be 0-${MAX_PROFIT_SHARE}%.`;
+      if (w.cities[holder].stats.money < deal.price) return `${holder === from ? 'You need' : 'They need'} $${deal.price.toLocaleString()} to pay for the licence.`;
+      return null;
+    }
   }
 };
 
+// The player who gets the right to build (the one who isn't the creator)
+export const licenceHolder = (w: Pick<DealWorld, 'assets'>, from: number, to: number, deal: Extract<Deal, { kind: 'asset_licence' }>) =>
+  w.assets[deal.assetId]?.creator === from ? to : from;
+
+// Days left on a holder's licence for an asset (0 if none or expired)
+export const licenceDaysLeft = (licences: Licence[], assetId: string, holder: number, day: number) => {
+  const l = licences.find(x => x.assetId === assetId && x.holder === holder);
+  return l ? Math.max(0, l.expiresDay - day) : 0;
+};
+
 // Short description for the other player, e.g. "build a bridge between your cities (you each pay $75)"
-export const describeDeal = (deal: Deal): string => {
+export const describeDeal = (deal: Deal, assetName: (id: string) => string = () => 'an asset'): string => {
   switch (deal.kind) {
+    case 'asset_licence': {
+      const parts = [`$${deal.price.toLocaleString()} up front`];
+      if (deal.share > 0) parts.push(`${deal.share}% of its tourism`);
+      return `license ${assetName(deal.assetId)} for ${deal.days} days (${parts.join(' + ')}, paid to its creator)`;
+    }
     case 'bridge': return `build a bridge between your cities (you each pay $${BRIDGE_SHARE})`;
     case 'remove_bridge': return 'remove the bridge between your cities';
     case 'bridge_commuting': return deal.open ? 'reopen your bridge to commuters' : 'close your bridge to commuters';
@@ -71,6 +101,7 @@ export interface Settlement {
   tiles?: TileData[]; // Changed tiles
   cities?: Record<number, CoopCity>;
   bridges?: BridgeInfo[];
+  licences?: Licence[];
   news?: string; // Announcement for everyone
 }
 
@@ -113,5 +144,25 @@ export const settleDeal = (w: DealWorld, p: Proposal, nameOf: (slot: number) => 
         bridges: w.bridges.map(b => (b.id === deal.bridgeId ? { ...b, commuting: deal.open } : b)),
         news: deal.open ? `${names} reopened their bridge to commuters.` : `${names} closed their bridge to commuters.`,
       };
+    case 'asset_licence': {
+      const asset = w.assets[deal.assetId];
+      const holder = licenceHolder(w, p.from, p.to, deal);
+      const creator = asset.creator;
+      const cities = { ...w.cities };
+      cities[holder] = { ...cities[holder], stats: { ...cities[holder].stats, money: cities[holder].stats.money - deal.price } };
+      cities[creator] = { ...cities[creator], stats: { ...cities[creator].stats, money: cities[creator].stats.money + deal.price } };
+      // Renewing extends the current licence (from today if it already ran out)
+      const existing = w.licences.find(l => l.assetId === deal.assetId && l.holder === holder);
+      const licences = existing
+        ? w.licences.map(l => (l === existing ? { ...l, share: deal.share, expiresDay: Math.max(l.expiresDay, w.day) + deal.days } : l))
+        : [...w.licences, { id: newId(), assetId: deal.assetId, holder, creator, share: deal.share, expiresDay: w.day + deal.days }];
+      const terms = [`$${deal.price.toLocaleString()}`, ...(deal.share > 0 ? [`${deal.share}% of tourism`] : [])].join(' + ');
+      return {
+        ok: true,
+        cities,
+        licences,
+        news: `${nameOf(holder)} ${existing ? 'renewed' : 'licensed'} ${asset.spec.name} from ${nameOf(creator)} for ${deal.days} days (${terms}).`,
+      };
+    }
   }
 };

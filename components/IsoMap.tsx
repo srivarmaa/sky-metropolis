@@ -15,7 +15,10 @@ import {
   isRoadType, isRoadAt, roadConnections, hasSignals, signalLamp, LAMP_RED, LAMP_GREEN, SIDES, SIDE_DIRS, Side,
   daylight, sunHeight, timeOfDay, buildPedestrianGraph, PedEdge,
 } from '../services/roads';
-import { needsRoad, hasRoadAccess, isPolluted } from '../services/city';
+import { needsRoad, buildingHasRoad, isPolluted } from '../services/city';
+import { placementProblem, footprintTiles } from '../services/build';
+import { AssetSpec, rotateFootprint } from '../services/assets/spec';
+import { AssetModel, Placeholder } from './AssetModel';
 import {
   TopViewIcon, PerspectiveIcon, RotateLeftIcon, RotateRightIcon, WalkIcon, CloseIcon,
   ChevronUpIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon,
@@ -1019,8 +1022,8 @@ const RoadDetails = React.memo(({ x, y, grid, yOffset }: { x: number; y: number;
   );
 });
 
-// Floating "no road" sign over buildings that have no road next to them
-const NoRoadSign = () => {
+// Floating warning sign: red "no road" over buildings without a road; amber over monuments whose licence ran out
+const NoRoadSign = ({ color = '#dc2626' }: { color?: string }) => {
   const ref = useRef<THREE.Group>(null);
   useFrame(({ clock }) => {
     if (ref.current) ref.current.position.y = 1.5 + Math.sin(clock.elapsedTime * 3) * 0.06;
@@ -1030,7 +1033,7 @@ const NoRoadSign = () => {
       <Billboard>
         <mesh renderOrder={10} raycast={noRaycast}>
           <circleGeometry args={[0.17, 24]} />
-          <meshBasicMaterial color="#dc2626" depthTest={false} transparent />
+          <meshBasicMaterial color={color} depthTest={false} transparent />
         </mesh>
         <mesh renderOrder={11} position={[0, 0, 0.001]} raycast={noRaycast}>
           <planeGeometry args={[0.22, 0.06]} />
@@ -1431,6 +1434,7 @@ export interface CoopMapInfo {
   players: CoopPlayer[];
   cursors: Record<number, { x: number; y: number }>;
   pendingBridges: { x: number; y: number }[][]; // Proposed bridges waiting for an answer (shown as ghosts)
+  closedMonuments: string[]; // "x,y" of monument anchors whose licence has run out
 }
 
 // A translucent deck where a bridge has been proposed
@@ -1516,9 +1520,48 @@ interface IsoMapProps {
   commuters: number; // Employed citizens; each one adds to traffic
   coop?: CoopMapInfo; // Co-op game: plot borders, friends' cursors, build only on your own plot
   onHoverTile?: (tile: { x: number; y: number } | null) => void;
+  assets: Record<string, AssetSpec>; // Assets this player can draw, by content id
+  placing?: { spec: AssetSpec; rotation: number }; // Monument tool: the asset being placed
 }
 
-const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, population, commuters, coop, onHoverTile }) => {
+// A placed monument, drawn once over its whole footprint (a placeholder until its asset is available)
+const MonumentOnMap = React.memo(({ tile, spec, size }: { tile: TileData; spec?: AssetSpec; size: number }) => {
+  const m = tile.monument!;
+  const [fw, fd] = m.footprint;
+  const [wx, , wz] = gridToWorld(tile.x + (fw - 1) / 2, tile.y + (fd - 1) / 2, size);
+  return (
+    <group position={[wx, -0.28, wz]}>
+      {spec
+        ? <group rotation={[0, -m.rotation * Math.PI / 2, 0]}><AssetModel spec={spec} /></group>
+        : <Placeholder footprint={m.footprint} />}
+    </group>
+  );
+});
+
+const footprintOkMat = new THREE.MeshBasicMaterial({ color: '#22c55e', transparent: true, opacity: 0.45, depthWrite: false, toneMapped: false });
+const footprintBadMat = new THREE.MeshBasicMaterial({ color: '#ef4444', transparent: true, opacity: 0.45, depthWrite: false, toneMapped: false });
+
+// Monument tool: the footprint under the cursor (green if it fits, red if not) and a ghost of the asset
+const MonumentGhost = ({ x, y, spec, rotation, grid, slot }: { x: number; y: number; spec: AssetSpec; rotation: number; grid: Grid; slot: number | null }) => {
+  const footprint = rotateFootprint(spec.footprint, rotation);
+  const fits = placementProblem(grid, x, y, footprint, slot) === null;
+  const size = grid.length;
+  const [cx, , cz] = gridToWorld(x + (footprint[0] - 1) / 2, y + (footprint[1] - 1) / 2, size);
+  return (
+    <group raycast={noRaycast}>
+      {footprintTiles(x, y, footprint).map(t => {
+        const [wx, , wz] = gridToWorld(t.x, t.y, size);
+        const ok = fits || (grid[t.y]?.[t.x]?.buildingType === BuildingType.None && (slot === null || grid[t.y][t.x].owner === slot));
+        return <mesh key={`${t.x},${t.y}`} geometry={boxGeo} material={ok ? footprintOkMat : footprintBadMat} position={[wx, -0.25, wz]} scale={[0.96, 0.02, 0.96]} raycast={noRaycast} />;
+      })}
+      <group position={[cx, -0.28, cz]} rotation={[0, -rotation * Math.PI / 2, 0]}>
+        <AssetModel spec={spec} opacity={fits ? 0.7 : 0.35} />
+      </group>
+    </group>
+  );
+};
+
+const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, population, commuters, coop, onHoverTile, assets, placing }) => {
   const [hoveredTile, setHoveredTile] = useState<{x: number, y: number} | null>(null);
   const [cameraView, setCameraView] = useState<CameraView>('3d');
   const [rotateRequest, setRotateRequest] = useState({ id: 0, step: 0 });
@@ -1610,10 +1653,16 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
   const previewPos = hoveredTile ? gridToWorld(hoveredTile.x, hoveredTile.y, gridSize) : [0,0,0];
 
   // Warning markers: buildings without a road, and houses under factory smog
+  const monumentAnchors = useMemo(() => grid.flat().filter(t => t.monument), [grid]);
+
+  const closedKey = coop?.closedMonuments.join('|') ?? '';
+  const closedSet = useMemo(() => new Set(closedKey ? closedKey.split('|') : []), [closedKey]);
   const tileStatus = useMemo(() => grid.map(row => row.map(t => ({
-    noRoad: needsRoad(t.buildingType) && !hasRoadAccess(grid, t.x, t.y),
+    // A monument shows its sign once, over its anchor tile
+    noRoad: needsRoad(t.buildingType) && !t.anchor && !buildingHasRoad(grid, t),
+    closed: !!t.monument && closedSet.has(`${t.x},${t.y}`),
     smog: isPolluted(grid, t.x, t.y),
-  }))), [grid]);
+  }))), [grid, closedSet]);
 
   // A few cars always drive around; more join as commuters fill the roads (so jams show up as queues)
   const roadCount = useMemo(() => grid.reduce((n, row) => n + row.filter(t => isRoadType(t.buildingType)).length, 0), [grid]);
@@ -1675,6 +1724,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
                       />
                     )}
                     {tileStatus[y][x].noRoad && <NoRoadSign />}
+                    {tileStatus[y][x].closed && !tileStatus[y][x].noRoad && <NoRoadSign color="#f59e0b" />}
                     {tileStatus[y][x].smog && <Smog />}
                 </group>
               </React.Fragment>
@@ -1685,6 +1735,13 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
           <group raycast={() => null}>
             <TrafficSystem grid={grid} carCount={carCount} />
             <PopulationSystem population={population} grid={grid} />
+
+            {monumentAnchors.map(t => (
+              <group key={`m${t.x},${t.y}`}><MonumentOnMap tile={t} spec={assets[t.monument!.assetId]} size={gridSize} /></group>
+            ))}
+            {placing && hoveredTool === BuildingType.Monument && hoveredTile && (
+              <MonumentGhost x={hoveredTile.x} y={hoveredTile.y} spec={placing.spec} rotation={placing.rotation} grid={grid} slot={coop ? coop.mySlot : null} />
+            )}
 
             {coop && <PlotBorders coop={coop} size={gridSize} />}
             {coop && coop.pendingBridges.map((tiles: { x: number; y: number }[], i: number) => (
@@ -1717,7 +1774,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
             )}
 
             {/* Highlight */}
-            {hoveredTile && (
+            {hoveredTile && !(placing && hoveredTool === BuildingType.Monument) && (
               <Cursor 
                 x={hoveredTile.x} 
                 y={hoveredTile.y} 

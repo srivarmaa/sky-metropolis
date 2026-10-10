@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useEffect, useRef } from 'react';
-import { BuildingType, CityStats, AIGoal, NewsItem, EconomyReport, CoopCity, CoopPlayer } from '../types';
-import { BUILDINGS } from '../constants';
+import { AssetTier, BuildingType, CityStats, AIGoal, NewsItem, EconomyReport, CoopCity, CoopPlayer } from '../types';
+import { ASSET_TIERS, BUILDINGS } from '../constants';
 import { DownloadIcon } from './Icons';
 import { DealsPanel, DealsInfo } from './CoopPanels';
+import { AssetMarketPanel, MarketInfo } from './AssetMarket';
 
 interface UIOverlayProps {
   stats: CityStats;
@@ -20,7 +21,50 @@ interface UIOverlayProps {
   onSaveLayout: () => void;
   economy: EconomyReport;
   coop?: CoopInfo; // Co-op game: shows the players panel instead of the AI advisor
+  onOpenStudio: () => void;
+  monuments?: MonumentPicker; // Monument tool: which of your assets to build
 }
+
+export interface MonumentPicker {
+  options: { key: string; name: string; tier: AssetTier; footprint: [number, number]; cost: number; note?: string; disabled?: boolean }[];
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+  rotation: number; // Quarter turns
+  onRotate: () => void;
+}
+
+// Choose which monument to build (shown above the toolbar while the Monument tool is selected)
+const MonumentPickerPanel: React.FC<{ picker: MonumentPicker; money: number; onOpenStudio: () => void }> = ({ picker, money, onOpenStudio }) => (
+  <div className="mb-2 w-full md:w-96 bg-gray-900/95 border border-violet-500/40 rounded-xl p-2 shadow-2xl backdrop-blur-xl">
+    <div className="flex items-center gap-2 mb-1.5 px-1">
+      <span className="text-[10px] font-bold uppercase tracking-widest text-violet-200 mr-auto">Your monuments</span>
+      <button onClick={picker.onRotate} title="Rotate (R)" className="text-[10px] font-bold px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white">
+        ⟳ Rotate · {picker.rotation * 90}°
+      </button>
+      <button onClick={onOpenStudio} className="text-[10px] font-bold px-2 py-1 rounded-md bg-violet-600 hover:bg-violet-500 text-white">Asset Studio</button>
+    </div>
+    {picker.options.length === 0 ? (
+      <p className="text-[11px] text-gray-400 px-1 pb-1">No assets yet. Open the Asset Studio to design one, or ask ChatGPT/Claude with the AI skill file.</p>
+    ) : (
+      <ul className="flex flex-col gap-1 max-h-40 overflow-y-auto">
+        {picker.options.map(o => (
+          <li key={o.key}>
+            <button
+              onClick={() => picker.onSelect(o.key)}
+              disabled={o.disabled}
+              title={o.note}
+              className={`w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-md text-xs border ${o.key === picker.selectedKey ? 'bg-violet-500/20 border-violet-400/60 text-white' : 'border-transparent hover:bg-gray-800 text-gray-200'}`}
+            >
+              <span className="font-bold truncate flex-1">{o.name}{o.note && <span className="block text-[9px] font-normal text-gray-400 truncate">{o.note}</span>}</span>
+              <span className="text-[10px] text-gray-400">{ASSET_TIERS[o.tier].label} · {o.footprint[0]}×{o.footprint[1]}</span>
+              <span className={`text-[10px] font-mono ${money >= o.cost ? 'text-green-300' : 'text-red-400'}`}>${o.cost.toLocaleString()}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    )}
+  </div>
+);
 
 export interface CoopInfo {
   roomCode: string;
@@ -29,6 +73,7 @@ export interface CoopInfo {
   mySlot: number;
   isHost: boolean;
   deals: DealsInfo;
+  market: MarketInfo;
 }
 
 const PlayersPanel: React.FC<{ coop: CoopInfo }> = ({ coop }) => {
@@ -120,6 +165,7 @@ const ToolButton: React.FC<{
         {isBulldoze && <div className="w-full h-full bg-red-600 text-white flex justify-center items-center font-bold text-base md:text-lg">✕</div>}
         {type === BuildingType.Road && <div className="w-full h-2 bg-gray-800 transform -rotate-45"></div>}
         {type === BuildingType.Roundabout && <div className="w-3.5 h-3.5 md:w-4 md:h-4 rounded-full bg-green-500 border-2 border-white/90"></div>}
+        {type === BuildingType.Monument && <div className="w-full h-full bg-violet-950 flex items-end justify-center"><div className="w-2 h-5 md:h-6 bg-violet-200 border-t-4 border-amber-300"></div></div>}
         {type === BuildingType.Bridge && <div className="w-full h-full bg-sky-400 flex items-center"><div className="w-full h-2 bg-gray-700 border-y border-white/80"></div></div>}
       </div>
       <span className="text-[8px] md:text-[10px] font-bold text-white uppercase tracking-wider drop-shadow-md leading-none">{config.name}</span>
@@ -141,7 +187,9 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
   aiEnabled,
   onSaveLayout,
   economy,
-  coop
+  coop,
+  onOpenStudio,
+  monuments
 }) => {
   const newsRef = useRef<HTMLDivElement>(null);
 
@@ -223,12 +271,22 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
             <DownloadIcon className="w-4 h-4" />
             <span className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider leading-none">Save</span>
           </button>
+          <button
+            onClick={onOpenStudio}
+            title="Asset Studio: design your own landmarks (by hand or with ChatGPT/Claude)"
+            aria-label="Open the Asset Studio"
+            className="flex flex-col items-center justify-center gap-1 w-10 h-10 md:w-12 md:h-12 text-violet-100 bg-gray-900/80 hover:bg-gray-800 border-2 border-violet-500/50 hover:border-violet-400 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+          >
+            <span className="text-sm leading-none" aria-hidden>✦</span>
+            <span className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider leading-none">Assets</span>
+          </button>
         </div>
 
         {coop ? (
           <div className="flex flex-col gap-2 w-full md:w-80">
             <PlayersPanel coop={coop} />
             <DealsPanel info={coop.deals} />
+            <AssetMarketPanel info={coop.market} />
           </div>
         ) : (
         /* AI Goal Panel */
@@ -319,9 +377,11 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
             This works perfectly.
         */}
         
+        <div className="flex flex-col w-full md:w-auto">
+        {selectedTool === BuildingType.Monument && monuments && <MonumentPickerPanel picker={monuments} money={stats.money} onOpenStudio={onOpenStudio} />}
         <div className="flex gap-1 md:gap-2 bg-gray-900/80 p-1 md:p-2 rounded-2xl border border-gray-600/50 backdrop-blur-xl shadow-2xl w-full md:w-auto overflow-x-auto no-scrollbar justify-start md:justify-start">
           <div className="flex gap-1 md:gap-2 min-w-max px-1">
-            {(coop ? [...tools, BuildingType.Bridge] : tools).map((type) => (
+            {[...tools, ...(monuments ? [BuildingType.Monument] : []), ...(coop ? [BuildingType.Bridge] : [])].map((type) => (
               <ToolButton
                 key={type}
                 type={type}
@@ -332,6 +392,7 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
             ))}
           </div>
           <div className="text-[8px] text-gray-500 uppercase writing-mode-vertical flex items-center justify-center font-bold tracking-widest border-l border-gray-700 pl-1 ml-1 select-none">Build</div>
+        </div>
         </div>
 
         {/* News Feed */}

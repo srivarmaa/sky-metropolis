@@ -37,6 +37,42 @@ const onDisconnect = (conn: DataConnection, cb: () => void) => {
   conn.on('iceStateChanged', state => { if (state === 'disconnected' || state === 'failed' || state === 'closed') fire(); });
 };
 
+// --- Large messages ---
+// WebRTC data channels drop very large messages, so anything big (worlds, assets with models) is split
+// into chunks and joined back together on arrival. Small messages go through untouched.
+
+const CHUNK_SIZE = 60_000; // Characters of JSON per chunk
+interface Chunk { t: '__chunk'; id: string; i: number; n: number; data: string }
+
+export const splitMessage = (msg: unknown): unknown[] => {
+  const text = JSON.stringify(msg);
+  if (text.length <= CHUNK_SIZE) return [msg];
+  const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const n = Math.ceil(text.length / CHUNK_SIZE);
+  return Array.from({ length: n }, (_, i): Chunk => ({ t: '__chunk', id, i, n, data: text.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE) }));
+};
+
+// Returns each complete message (chunked or not), or undefined while chunks are still arriving
+export const createReassembler = () => {
+  const partial = new Map<string, { parts: string[]; received: number }>();
+  return (data: any): unknown | undefined => {
+    if (data?.t !== '__chunk') return data;
+    const c = data as Chunk;
+    if (!Number.isInteger(c.n) || c.n < 1 || c.n > 2000 || !Number.isInteger(c.i) || c.i < 0 || c.i >= c.n) return undefined;
+    const entry = partial.get(c.id) ?? { parts: new Array<string>(c.n), received: 0 };
+    if (entry.parts[c.i] === undefined) { entry.parts[c.i] = c.data; entry.received++; }
+    partial.set(c.id, entry);
+    if (entry.received < c.n) return undefined;
+    partial.delete(c.id);
+    try { return JSON.parse(entry.parts.join('')); } catch { return undefined; }
+  };
+};
+
+const sendTo = (conn: DataConnection, msg: unknown) => {
+  if (!conn.open) return;
+  for (const part of splitMessage(msg)) conn.send(part);
+};
+
 // --- Host ---
 
 export interface HostHandlers {
@@ -83,7 +119,11 @@ export const hostRoom = async (): Promise<HostSession> => {
       conns.set(conn.peer, conn);
       handlers.join?.(conn.peer);
     });
-    conn.on('data', data => handlers.message?.(conn.peer, data as ClientMessage));
+    const reassemble = createReassembler();
+    conn.on('data', data => {
+      const msg = reassemble(data);
+      if (msg !== undefined) handlers.message?.(conn.peer, msg as ClientMessage);
+    });
     onDisconnect(conn, () => {
       if (conns.delete(conn.peer)) handlers.leave?.(conn.peer);
     });
@@ -94,8 +134,11 @@ export const hostRoom = async (): Promise<HostSession> => {
   return {
     code,
     setHandlers: h => { handlers = h; },
-    send: (id, msg) => { const c = conns.get(id); if (c?.open) c.send(msg); },
-    broadcast: (msg, except) => conns.forEach((c, id) => { if (id !== except && c.open) c.send(msg); }),
+    send: (id, msg) => { const c = conns.get(id); if (c) sendTo(c, msg); },
+    broadcast: (msg, except) => {
+      const parts = splitMessage(msg); // Split once for everyone
+      conns.forEach((c, id) => { if (id !== except && c.open) parts.forEach(p => c.send(p)); });
+    },
     kick: id => { conns.get(id)?.close(); conns.delete(id); },
     close: () => peer!.destroy(),
   };
@@ -136,9 +179,12 @@ export const joinRoom = async (rawCode: string): Promise<ClientSession> => {
   let handlers: ClientHandlers = {};
   // Messages can arrive before the app swaps in its handlers; queue them until then
   const pending: HostMessage[] = [];
+  const reassemble = createReassembler();
   conn.on('data', data => {
-    if (handlers.message) handlers.message(data as HostMessage);
-    else pending.push(data as HostMessage);
+    const msg = reassemble(data) as HostMessage | undefined;
+    if (msg === undefined) return;
+    if (handlers.message) handlers.message(msg);
+    else pending.push(msg);
   });
   onDisconnect(conn, () => handlers.close?.());
 
@@ -148,7 +194,7 @@ export const joinRoom = async (rawCode: string): Promise<ClientSession> => {
       handlers = h;
       if (h.message) pending.splice(0).forEach(h.message);
     },
-    send: msg => { if (conn.open) conn.send(msg); },
+    send: msg => sendTo(conn, msg),
     close: () => peer.destroy(),
   };
 };

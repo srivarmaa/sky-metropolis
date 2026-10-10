@@ -4,9 +4,10 @@
 */
 import { CityStats } from '../../types';
 import { MAX_PLAYERS, PLAYER_COLORS, RIVER_WIDTH } from '../../constants';
-import { LAYOUT_FORMAT, tileCode } from '../layoutFile';
+import { LAYOUT_FORMAT, SavedMonument, tileCode } from '../layoutFile';
+import { LICENCE_DAY_OPTIONS, MAX_PROFIT_SHARE } from '../../constants';
 import { BuildingType } from '../../types';
-import { BridgeInfo } from './protocol';
+import { BridgeInfo, Licence } from './protocol';
 import { worldSize } from './world';
 
 /**
@@ -27,6 +28,8 @@ export interface CoopSave {
   players: CoopSavePlayer[];
   cities: Record<number, CityStats>;
   bridges: BridgeInfo[];
+  monuments: SavedMonument[]; // Details for the "M" tiles (asset files aren't saved: players share them again)
+  licences: Licence[];
 }
 
 export const serializeCoopSave = (save: CoopSave): string =>
@@ -92,5 +95,13 @@ export const parseCoopSave = (text: string): CoopSave => {
     && isInt(b.a, 0, MAX_PLAYERS - 1) && isInt(b.b, 0, MAX_PLAYERS - 1) && typeof b.commuting === 'boolean'
   ).map((b: any) => ({ id: b.id, tiles: b.tiles.map((t: any) => ({ x: t.x, y: t.y })), ends: b.ends.map((e: any) => ({ x: e.x, y: e.y })), a: b.a, b: b.b, commuting: b.commuting }));
 
-  return { plotSize, day, rows: rows as string[], players, cities, bridges };
+  // Monument details are checked against the map when the world is rebuilt (applyMonuments)
+  const monuments: SavedMonument[] = Array.isArray(data.monuments) ? data.monuments.filter((m: any) => isPos(m, size)) : [];
+  const licences: Licence[] = (Array.isArray(data.licences) ? data.licences : []).filter((l: any) =>
+    l && typeof l.id === 'string' && typeof l.assetId === 'string'
+    && isInt(l.holder, 0, MAX_PLAYERS - 1) && isInt(l.creator, 0, MAX_PLAYERS - 1) && l.holder !== l.creator
+    && isInt(l.share, 0, MAX_PROFIT_SHARE) && isInt(l.expiresDay, 0, day + Math.max(...LICENCE_DAY_OPTIONS) * 20)
+  ).map((l: any) => ({ id: l.id, assetId: l.assetId, holder: l.holder, creator: l.creator, share: l.share, expiresDay: l.expiresDay }));
+
+  return { plotSize, day, rows: rows as string[], players, cities, bridges, monuments, licences };
 };

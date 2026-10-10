@@ -12,6 +12,18 @@ export enum BuildingType {
   Park = 'Park',
   Water = 'Water', // Co-op river and lake between plots; can't be built on
   Bridge = 'Bridge', // Co-op road over the river between two cities (both players must agree)
+  Monument = 'Monument', // A player-made landmark (see services/assets); may cover several tiles
+}
+
+export type AssetTier = 'monument' | 'grand';
+
+// Stored on the top-left ("anchor") tile of a placed monument
+export interface PlacedMonument {
+  assetId: string;
+  name: string;
+  tier: AssetTier;
+  footprint: [number, number]; // Tiles covered (width along x, depth along y), after rotation
+  rotation: number; // Quarter turns, 0-3
 }
 
 export interface BuildingConfig {
@@ -33,6 +45,9 @@ export interface TileData {
   variant?: number;
   // Co-op: the player slot whose plot this tile belongs to (absent in solo games and on water)
   owner?: number;
+  // Monuments: the anchor tile holds the details; the other covered tiles point to the anchor
+  monument?: PlacedMonument;
+  anchor?: { x: number; y: number };
 }
 
 export type Grid = TileData[][];
@@ -55,6 +70,8 @@ export interface EconomyReport {
   commutersIn: number; // Co-op: workers from bridge-linked cities filling jobs here
   commutersOut: number; // Co-op: residents working in bridge-linked cities
   commuteTax: number; // Co-op: wage tax received for residents working elsewhere, minus tax paid for commuters working here
+  tourism: number; // Visitors' spending at open monuments
+  royalties: number; // Co-op: profit-share licence payments received from other cities, minus those paid to creators
   income: number; // Rounded net change to the treasury (income - upkeep + commute tax)
 }
 

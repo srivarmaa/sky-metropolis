@@ -5,9 +5,12 @@
 import { CoopCity, EconomyReport, Grid } from '../../types';
 import { COMMUTE_TAX, INITIAL_MONEY } from '../../constants';
 import { CityAnalysis, analyzeCity } from '../city';
-import { CityProblem, EMPTY_ECONOMY, computeEconomy, computePopulation, findCityProblems } from '../economy';
+import { CityProblem, EMPTY_ECONOMY, computeEconomy, computePopulation, findCityProblems, monumentEffects } from '../economy';
 import { isRoadType } from '../roads';
-import { BridgeInfo } from './protocol';
+import { BridgeInfo, Licence } from './protocol';
+
+// A licence is valid until (not including) its expiry day
+export const licenceValid = (l: Licence, day: number) => day < l.expiresDay;
 
 export const newCoopCity = (day: number): CoopCity => ({
   stats: { money: INITIAL_MONEY, population: 0, day },
@@ -43,7 +46,9 @@ export interface CoopDayResult {
  * residents fill open jobs in the neighbouring city; the employer keeps the output and pays the
  * commuters' home city a wage tax on it.
  */
-export const simulateCoopDay = (grid: Grid, cities: Record<number, CoopCity>, day: number, links: [number, number][] = []): CoopDayResult => {
+export const simulateCoopDay = (
+  grid: Grid, cities: Record<number, CoopCity>, day: number, links: [number, number][] = [], licences: Licence[] = [],
+): CoopDayResult => {
   const slots = Object.keys(cities).map(Number);
   const linked = (s: number) => links.flatMap(([a, b]) => (a === s ? [b] : b === s ? [a] : [])).filter(n => cities[n]);
 
@@ -53,6 +58,11 @@ export const simulateCoopDay = (grid: Grid, cities: Record<number, CoopCity>, da
   for (const s of slots) {
     const prev = cities[s];
     analyses[s] = analyzeCity(grid, s);
+    // Monuments built under a licence close while it has run out (the creator's own are always open)
+    for (const m of analyses[s].monuments) {
+      const lic = licences.find(l => l.assetId === m.assetId && l.holder === s);
+      if (lic) m.open = licenceValid(lic, day);
+    }
     const openNearby = linked(s).reduce((n, o) => n + Math.max(0, cities[o].economy.jobs - cities[o].economy.workers), 0);
     population[s] = computePopulation(analyses[s], prev.stats.population, prev.economy.commutersOut + openNearby);
   }
@@ -97,12 +107,27 @@ export const simulateCoopDay = (grid: Grid, cities: Record<number, CoopCity>, da
     for (const [home, flow] of Object.entries(sources[s])) tax[Number(home)] += owed * (flow / inflow[s]);
   }
 
+  // 5. Profit-share licences: a cut of each licensed monument's tourism goes to the asset's creator
+  const royalties: Record<number, number> = Object.fromEntries(slots.map(s => [s, 0]));
+  for (const s of slots) {
+    const sites = analyses[s].monuments;
+    const perSite = monumentEffects(sites).perSite;
+    sites.forEach((m, i) => {
+      const lic = licences.find(l => l.assetId === m.assetId && l.holder === s);
+      if (!lic || lic.share <= 0 || !m.open || perSite[i] <= 0 || !cities[lic.creator]) return;
+      const cut = perSite[i] * (lic.share / 100);
+      royalties[s] -= cut;
+      royalties[lic.creator] += cut;
+    });
+  }
+
   for (const s of slots) {
     const economy: EconomyReport = {
       ...finals[s],
       commutersOut: outflow[s],
       commuteTax: tax[s],
-      income: Math.round(finals[s].income + tax[s]),
+      royalties: royalties[s],
+      income: Math.round(finals[s].income + tax[s] + royalties[s]),
     };
     const money = Math.max(0, cities[s].stats.money + economy.income);
     result.cities[s] = { stats: { money, population: population[s], day }, economy };

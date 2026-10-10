@@ -5,13 +5,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BuildingType, CoopCity, CoopPlayer, Grid, TileData } from '../../types';
 import { COOP_DEFAULT_PLOT_SIZE, MAX_PLAYERS, PLAYER_COLORS, PROPOSAL_TTL_MS } from '../../constants';
-import { tryBuild } from '../build';
+import { tryBuild, tryBuildMonument } from '../build';
 import { CITY_PROBLEM_NEWS, CityProblem } from '../economy';
-import { encodeRows } from '../layoutFile';
-import { BridgeInfo, ClientMessage, Deal, HostMessage, Proposal } from './protocol';
+import { applyMonuments, encodeRows, listMonuments } from '../layoutFile';
+import { AssetSpec, AssetTerms, assetId, cleanTerms, validateAsset } from '../assets/spec';
+import { BridgeInfo, ClientMessage, Deal, HostMessage, Licence, Proposal, RoomAsset } from './protocol';
 import { ClientSession, HostSession, formatCode, hostRoom, joinRoom } from './session';
 import { TilePos, createCoopWorld, riverCrossing, worldFromRows } from './world';
-import { commuteLinks, newCoopCity, simulateCoopDay } from './hostSim';
+import { commuteLinks, licenceValid, newCoopCity, simulateCoopDay } from './hostSim';
 import { checkDeal, describeDeal, sameDeal, settleDeal } from './deals';
 import { CoopSave, downloadCoopSave } from './saveFile';
 
@@ -56,6 +57,9 @@ export function useCoopGame(options: CoopOptions) {
   const [clockOffset, setClockOffset] = useState(0); // Host clock minus ours, for countdowns
   const [loadedSave, setLoadedSave] = useState<CoopSave | null>(null); // Host: the saved world being continued
   const savedRef = useRef<CoopSave | null>(null);
+  const [assets, setAssetsState] = useState<Record<string, RoomAsset>>({}); // Shared with the room this session
+  const [licences, setLicencesState] = useState<Licence[]>([]);
+  const [day, setDay] = useState(1);
 
   const host = useRef<HostSession | null>(null);
   const client = useRef<ClientSession | null>(null);
@@ -70,6 +74,9 @@ export function useCoopGame(options: CoopOptions) {
   const mySlotRef = useRef<number | null>(null);
   const problemsRef = useRef<Record<number, CityProblem[]>>({});
   const dayRef = useRef(1);
+  const assetsRef = useRef<Record<string, RoomAsset>>({});
+  const licencesRef = useRef<Licence[]>([]);
+  const assetQueue = useRef<Promise<void>>(Promise.resolve()); // Host: shares and monument builds run in arrival order
 
   const setPhase = (p: CoopPhase) => { phaseRef.current = p; setPhaseState(p); };
   const setRoleBoth = (r: CoopRole | null) => { roleRef.current = r; setRole(r); };
@@ -79,6 +86,10 @@ export function useCoopGame(options: CoopOptions) {
   const setBridges = (b: BridgeInfo[]) => { bridgesRef.current = b; setBridgesState(b); };
   const setPlotSize = (size: number) => { plotSizeRef.current = size; setPlotSizeState(size); };
   const setMine = (slot: number | null) => { mySlotRef.current = slot; setMySlot(slot); };
+  const setAssets = (a: Record<string, RoomAsset>) => { assetsRef.current = a; setAssetsState(a); };
+  const setLicences = (l: Licence[]) => { licencesRef.current = l; setLicencesState(l); };
+  const setDayBoth = (d: number) => { dayRef.current = d; setDay(d); };
+  const assetName = (id: string) => assetsRef.current[id]?.spec.name ?? 'an asset';
   const nameOf = (slot: number) => playersRef.current.find(p => p.slot === slot)?.name ?? `Player ${slot + 1}`;
 
   const reset = () => {
@@ -98,6 +109,8 @@ export function useCoopGame(options: CoopOptions) {
     setCursors({});
     setProposals([]);
     setBridges([]);
+    setAssets({});
+    setLicences([]);
     setMine(null);
   };
 
@@ -127,6 +140,7 @@ export function useCoopGame(options: CoopOptions) {
     t: 'welcome', you: slot, plotSize: plotSizeRef.current, rows: encodeRows(opts.current.getGrid()),
     players: playersRef.current, cities: citiesRef.current, day: dayRef.current,
     bridges: bridgesRef.current, proposals: proposalsRef.current, now: Date.now(),
+    monuments: listMonuments(opts.current.getGrid()), assets: Object.values(assetsRef.current), licences: licencesRef.current,
   });
 
   const broadcastCities = () => host.current?.broadcast({ t: 'cities', cities: citiesRef.current, day: dayRef.current });
@@ -138,10 +152,57 @@ export function useCoopGame(options: CoopOptions) {
     setBridges(next);
     host.current?.broadcast({ t: 'bridges', bridges: next });
   };
+  const publishLicences = (next: Licence[]) => {
+    setLicences(next);
+    host.current?.broadcast({ t: 'licences', licences: next });
+  };
   const dealWorld = () => ({
     grid: opts.current.getGrid(), plotSize: plotSizeRef.current, cities: citiesRef.current,
     bridges: bridgesRef.current, players: playersRef.current,
+    assets: assetsRef.current, licences: licencesRef.current, day: dayRef.current,
   });
+
+  // A player shares one of their assets with the room (re-shared each session; the first sharer is its creator)
+  const hostShare = async (slot: number, spec: AssetSpec, terms: AssetTerms) => {
+    const checked = validateAsset(spec);
+    if (!checked.asset) { notify(slot, `Couldn't share that asset: ${checked.errors[0]}`, 'negative'); return; }
+    const id = await assetId(checked.asset);
+    const existing = assetsRef.current[id];
+    if (existing) {
+      if (existing.creator !== slot) notify(slot, `${nameOf(existing.creator)} already shared ${existing.spec.name}. Ask them for a licence to build it.`, 'neutral');
+      return;
+    }
+    const asset: RoomAsset = { id, spec: checked.asset, creator: slot, terms: cleanTerms(terms) };
+    setAssets({ ...assetsRef.current, [id]: asset });
+    host.current?.broadcast({ t: 'asset_added', asset });
+    announce(`${nameOf(slot)} shared ${asset.spec.name} with the room.`, 'neutral');
+  };
+
+  // Build a monument: only its creator, or a player holding a valid licence
+  const hostBuildMonument = (slot: number, x: number, y: number, id: string, rotation: number) => {
+    const asset = assetsRef.current[id];
+    const city = citiesRef.current[slot];
+    if (!city) return;
+    if (!asset) { notify(slot, 'Share that asset with the room before building it.', 'negative'); return; }
+    if (asset.creator !== slot) {
+      const lic = licencesRef.current.find(l => l.assetId === id && l.holder === slot);
+      if (!lic || !licenceValid(lic, dayRef.current)) {
+        notify(slot, `You need a licence from ${nameOf(asset.creator)} to build ${asset.spec.name}. Ask in the Asset Market.`, 'negative');
+        return;
+      }
+    }
+    const placement = { assetId: id, name: asset.spec.name, tier: asset.spec.tier, footprint: asset.spec.footprint, rotation };
+    const result = tryBuildMonument(opts.current.getGrid(), city.stats.money, x, y, placement, slot);
+    if (!result.ok) { if (result.reason) notify(slot, result.reason, 'negative'); return; }
+    opts.current.applyTiles(result.tiles!);
+    setCities({ ...citiesRef.current, [slot]: { ...city, stats: { ...city.stats, money: city.stats.money - result.cost! } } });
+    host.current?.broadcast({ t: 'tiles', tiles: result.tiles! });
+    broadcastCities();
+    announce(`${nameOf(slot)} opened ${asset.spec.name}.`, 'positive');
+  };
+  const queueAssetWork = (work: () => void | Promise<void>) => {
+    assetQueue.current = assetQueue.current.then(work).catch(() => undefined);
+  };
 
   // Apply a build for any player (the host's own clicks too); everyone sees the result
   const hostBuild = (slot: number, x: number, y: number, tool: BuildingType) => {
@@ -152,9 +213,10 @@ export function useCoopGame(options: CoopOptions) {
       if (result.reason) notify(slot, result.reason, 'negative');
       return;
     }
-    opts.current.applyTiles([result.tile!]);
+    const changed = result.tiles ?? [result.tile!];
+    opts.current.applyTiles(changed);
     setCities({ ...citiesRef.current, [slot]: { ...city, stats: { ...city.stats, money: city.stats.money - result.cost! } } });
-    host.current?.broadcast({ t: 'tiles', tiles: [result.tile!] });
+    host.current?.broadcast({ t: 'tiles', tiles: changed });
     broadcastCities();
   };
 
@@ -172,7 +234,7 @@ export function useCoopGame(options: CoopOptions) {
       return;
     }
     publishProposals([...pending, { id: newId(), from, to, deal, expiresAt: Date.now() + PROPOSAL_TTL_MS }]);
-    notify(to, `${nameOf(from)} proposes to ${describeDeal(deal)}. Answer in the River Cities panel.`, 'neutral');
+    notify(to, `${nameOf(from)} proposes to ${describeDeal(deal, assetName)}. Answer in the Bridges & Deals panel.`, 'neutral');
     notify(from, `Proposal sent to ${nameOf(to)}. Waiting for them to accept.`, 'neutral');
   };
 
@@ -181,7 +243,7 @@ export function useCoopGame(options: CoopOptions) {
     if (!p || p.to !== slot) return; // Only the player asked can answer
     publishProposals(proposalsRef.current.filter(q => q.id !== id));
     if (!accept) {
-      notify(p.from, `${nameOf(p.to)} declined to ${describeDeal(p.deal)}.`, 'neutral');
+      notify(p.from, `${nameOf(p.to)} declined to ${describeDeal(p.deal, assetName)}.`, 'neutral');
       return;
     }
     const s = settleDeal(dealWorld(), p, nameOf);
@@ -197,6 +259,7 @@ export function useCoopGame(options: CoopOptions) {
     }
     if (s.cities) { setCities(s.cities); broadcastCities(); }
     if (s.bridges) publishBridges(s.bridges);
+    if (s.licences) publishLicences(s.licences);
     if (s.news) announce(s.news, 'positive');
   };
 
@@ -204,7 +267,7 @@ export function useCoopGame(options: CoopOptions) {
     const p = proposalsRef.current.find(q => q.id === id);
     if (!p || p.from !== slot) return; // Only the proposer can withdraw
     publishProposals(proposalsRef.current.filter(q => q.id !== id));
-    notify(p.to, `${nameOf(p.from)} withdrew their proposal to ${describeDeal(p.deal)}.`, 'neutral');
+    notify(p.to, `${nameOf(p.from)} withdrew their proposal to ${describeDeal(p.deal, assetName)}.`, 'neutral');
   };
 
   const onPeerMessage = (peer: string, msg: ClientMessage) => {
@@ -265,6 +328,12 @@ export function useCoopGame(options: CoopOptions) {
       case 'cancel':
         if (slot !== undefined) hostCancel(slot, msg.id);
         return;
+      case 'share_asset':
+        if (slot !== undefined && phaseRef.current === 'playing') queueAssetWork(() => hostShare(slot, msg.spec, msg.terms));
+        return;
+      case 'build_monument':
+        if (slot !== undefined && phaseRef.current === 'playing') queueAssetWork(() => hostBuildMonument(slot, msg.x, msg.y, msg.assetId, msg.rotation));
+        return;
     }
   };
 
@@ -311,7 +380,7 @@ export function useCoopGame(options: CoopOptions) {
           ? { slot, name: cleanName(name, slot), color, online: true, host: true }
           : { ...p, online: false })));
         setPlotSize(save.plotSize);
-        opts.current.setWorld(worldFromRows(save.plotSize, save.rows));
+        opts.current.setWorld(applyMonuments(worldFromRows(save.plotSize, save.rows), save.monuments));
       } else {
         setMine(0);
         setPlayers([{ slot: 0, name: cleanName(name, 0), color, online: true, host: true }]);
@@ -339,8 +408,9 @@ export function useCoopGame(options: CoopOptions) {
     const save = savedRef.current;
     if (save) {
       // Continue a saved world: every saved city keeps its treasury, even if its owner hasn't rejoined yet
-      opts.current.setWorld(worldFromRows(save.plotSize, save.rows));
-      dayRef.current = save.day;
+      opts.current.setWorld(applyMonuments(worldFromRows(save.plotSize, save.rows), save.monuments));
+      setDayBoth(save.day);
+      setLicences(save.licences);
       setCities(Object.fromEntries(playersRef.current.map(p => {
         const stats = save.cities[p.slot];
         return [p.slot, stats ? { ...newCoopCity(save.day), stats: { ...stats, day: save.day } } : newCoopCity(save.day)];
@@ -348,7 +418,8 @@ export function useCoopGame(options: CoopOptions) {
       setBridges(save.bridges);
     } else {
       opts.current.setWorld(createCoopWorld(plotSizeRef.current));
-      dayRef.current = 1;
+      setDayBoth(1);
+      setLicences([]);
       setCities(Object.fromEntries(playersRef.current.map(p => [p.slot, newCoopCity(1)])));
       setBridges([]);
     }
@@ -363,8 +434,19 @@ export function useCoopGame(options: CoopOptions) {
   const hostTick = () => {
     if (roleRef.current !== 'host' || phaseRef.current !== 'playing') return;
     const grid = opts.current.getGrid();
-    dayRef.current += 1;
-    const day = simulateCoopDay(grid, citiesRef.current, dayRef.current, commuteLinks(grid, bridgesRef.current));
+    setDayBoth(dayRef.current + 1);
+    const today = dayRef.current;
+    const day = simulateCoopDay(grid, citiesRef.current, today, commuteLinks(grid, bridgesRef.current), licencesRef.current);
+
+    // Licence reminders: 10 days left, and when it runs out
+    for (const l of licencesRef.current) {
+      const name = assetName(l.assetId);
+      if (l.expiresDay - today === 10) notify(l.holder, `Your licence for ${name} runs out in 10 days. Renew it in the Asset Market.`, 'neutral');
+      if (l.expiresDay === today) {
+        notify(l.holder, `Your licence for ${name} ran out: its monuments are closed until you renew.`, 'negative');
+        notify(l.creator, `${nameOf(l.holder)}'s licence for ${name} ran out.`, 'neutral');
+      }
+    }
     setCities(day.cities);
     broadcastCities();
 
@@ -404,8 +486,10 @@ export function useCoopGame(options: CoopOptions) {
         setBridges(msg.bridges);
         setProposals(msg.proposals);
         setClockOffset(msg.now - Date.now());
-        dayRef.current = msg.day;
-        opts.current.setWorld(worldFromRows(msg.plotSize, msg.rows));
+        setDayBoth(msg.day);
+        setAssets(Object.fromEntries(msg.assets.map(a => [a.id, a])));
+        setLicences(msg.licences);
+        opts.current.setWorld(applyMonuments(worldFromRows(msg.plotSize, msg.rows), msg.monuments));
         setPhase('playing');
         opts.current.onStart();
         return;
@@ -417,8 +501,14 @@ export function useCoopGame(options: CoopOptions) {
         opts.current.applyTiles(msg.tiles);
         return;
       case 'cities':
-        dayRef.current = msg.day;
+        setDayBoth(msg.day);
         setCities(msg.cities);
+        return;
+      case 'asset_added':
+        setAssets({ ...assetsRef.current, [msg.asset.id]: msg.asset });
+        return;
+      case 'licences':
+        setLicences(msg.licences);
         return;
       case 'players':
         setPlayers(msg.players);
@@ -530,6 +620,20 @@ export function useCoopGame(options: CoopOptions) {
     else client.current?.send({ t: 'build', x, y, tool });
   };
 
+  const shareAsset = (spec: AssetSpec, terms: AssetTerms) => {
+    const me = mySlotRef.current;
+    if (phaseRef.current !== 'playing' || me === null) return;
+    if (roleRef.current === 'host') queueAssetWork(() => hostShare(me, spec, terms));
+    else client.current?.send({ t: 'share_asset', spec, terms });
+  };
+
+  const buildMonument = (x: number, y: number, id: string, rotation: number) => {
+    const me = mySlotRef.current;
+    if (phaseRef.current !== 'playing' || me === null) return;
+    if (roleRef.current === 'host') queueAssetWork(() => hostBuildMonument(me, x, y, id, rotation));
+    else client.current?.send({ t: 'build_monument', x, y, assetId: id, rotation });
+  };
+
   const sendCursor = (tile: TilePos | null) => {
     if (phaseRef.current !== 'playing') return;
     if (roleRef.current === 'host' && mySlotRef.current !== null) host.current?.broadcast({ t: 'cursor', slot: mySlotRef.current, tile });
@@ -545,6 +649,8 @@ export function useCoopGame(options: CoopOptions) {
       players: playersRef.current.map(({ slot, name, color }) => ({ slot, name, color })),
       cities: Object.fromEntries((Object.entries(citiesRef.current) as [string, CoopCity][]).map(([slot, c]) => [slot, c.stats])),
       bridges: bridgesRef.current,
+      monuments: listMonuments(opts.current.getGrid()),
+      licences: licencesRef.current,
     });
   };
 
@@ -553,6 +659,7 @@ export function useCoopGame(options: CoopOptions) {
     active: phase === 'playing' || phase === 'ended',
     hostGame, joinGame, changePlotSize, startGame, leave: reset, clearError: () => setError(null),
     hostTick, requestBuild, sendCursor, propose, respond, cancel, exportSave, loadedSave,
+    assets, licences, day, shareAsset, buildMonument,
   };
 }
 

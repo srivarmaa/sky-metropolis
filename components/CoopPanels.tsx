@@ -17,6 +17,7 @@ export interface DealsInfo {
   onRespond: (id: string, accept: boolean) => void;
   onCancel: (id: string) => void;
   onPropose: (to: number, deal: Deal) => void;
+  assetName: (id: string) => string;
 }
 
 const secondsLeft = (p: Proposal, clockOffset: number) => Math.max(0, Math.ceil((p.expiresAt - (Date.now() + clockOffset)) / 1000));
@@ -51,7 +52,7 @@ export const DealsPanel: React.FC<{ info: DealsInfo }> = ({ info }) => {
     return () => clearInterval(id);
   }, [proposals.length]);
 
-  const pending = (bridgeId: string) => proposals.some(p => p.deal.kind !== 'bridge' && p.deal.bridgeId === bridgeId);
+  const pending = (bridgeId: string) => proposals.some(p => (p.deal.kind === 'remove_bridge' || p.deal.kind === 'bridge_commuting') && p.deal.bridgeId === bridgeId);
 
   return (
     <div className="w-full bg-slate-900/90 text-white rounded-xl border border-slate-700 shadow-2xl backdrop-blur-md overflow-hidden">
@@ -72,7 +73,7 @@ export const DealsPanel: React.FC<{ info: DealsInfo }> = ({ info }) => {
         {incoming.map(p => (
           <div key={p.id} className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 p-2 animate-fade-in" role="alert">
             <p className="text-[11px] md:text-xs leading-snug">
-              <span className="font-bold" style={{ color: colorOf(p.from) }}>{nameOf(p.from)}</span> proposes to {describeDeal(p.deal)}.
+              <span className="font-bold" style={{ color: colorOf(p.from) }}>{nameOf(p.from)}</span> proposes to {describeDeal(p.deal, info.assetName)}.
             </p>
             <div className="flex items-center gap-1.5 mt-1.5">
               <Btn tone="good" onClick={() => info.onRespond(p.id, true)}>Accept</Btn>
@@ -85,7 +86,7 @@ export const DealsPanel: React.FC<{ info: DealsInfo }> = ({ info }) => {
         {outgoing.map(p => (
           <div key={p.id} className="rounded-lg border border-slate-700 bg-slate-800/60 p-2">
             <p className="text-[11px] md:text-xs text-slate-300 leading-snug">
-              Waiting for <span className="font-bold" style={{ color: colorOf(p.to) }}>{nameOf(p.to)}</span> to agree to {describeDeal(p.deal)}.
+              Waiting for <span className="font-bold" style={{ color: colorOf(p.to) }}>{nameOf(p.to)}</span> to agree to {describeDeal(p.deal, info.assetName)}.
             </p>
             <div className="flex items-center gap-1.5 mt-1.5">
               <Btn onClick={() => info.onCancel(p.id)}>Cancel</Btn>

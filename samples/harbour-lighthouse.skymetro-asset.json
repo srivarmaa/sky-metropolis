@@ -1,0 +1,187 @@
+{
+  "format": "skymetro-asset",
+  "version": 1,
+  "name": "Harbour Lighthouse",
+  "description": "Red and white striped lighthouse with a rotating lamp.",
+  "tier": "monument",
+  "footprint": [
+    1,
+    1
+  ],
+  "parts": [
+    {
+      "shape": "cylinder",
+      "position": [
+        0,
+        0.05,
+        0
+      ],
+      "size": [
+        0.9,
+        0.1,
+        0.9
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#64748b",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false
+    },
+    {
+      "shape": "cylinder",
+      "position": [
+        0,
+        0.3,
+        0
+      ],
+      "size": [
+        0.5,
+        0.35,
+        0.5
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#f8fafc",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false,
+      "repeat": {
+        "count": 4,
+        "offset": [
+          0,
+          0.7,
+          0
+        ],
+        "rotate": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "shape": "cylinder",
+      "position": [
+        0,
+        0.65,
+        0
+      ],
+      "size": [
+        0.48,
+        0.35,
+        0.48
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#dc2626",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false,
+      "repeat": {
+        "count": 3,
+        "offset": [
+          0,
+          0.7,
+          0
+        ],
+        "rotate": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "shape": "cylinder",
+      "position": [
+        0,
+        2.62,
+        0
+      ],
+      "size": [
+        0.55,
+        0.06,
+        0.55
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#1f2937",
+      "metal": 0.7,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false
+    },
+    {
+      "shape": "box",
+      "position": [
+        0,
+        2.74,
+        0.1
+      ],
+      "size": [
+        0.12,
+        0.12,
+        0.06
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#fef9c3",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 3,
+      "glowAtNight": true,
+      "animate": {
+        "spin": 90,
+        "bob": 0
+      }
+    },
+    {
+      "shape": "cone",
+      "position": [
+        0,
+        2.88,
+        0
+      ],
+      "size": [
+        0.45,
+        0.24,
+        0.45
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#1f2937",
+      "metal": 0.6,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false
+    }
+  ]
+}
