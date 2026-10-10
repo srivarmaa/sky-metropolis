@@ -1,0 +1,187 @@
+{
+  "format": "skymetro-asset",
+  "version": 1,
+  "name": "Temple of the Sun",
+  "description": "A 2×2 marble temple with a ring of columns and a golden dome.",
+  "tier": "grand",
+  "footprint": [
+    2,
+    2
+  ],
+  "parts": [
+    {
+      "shape": "box",
+      "position": [
+        0,
+        0.1,
+        0
+      ],
+      "size": [
+        1.9,
+        0.2,
+        1.9
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#e7e5e4",
+      "metal": 0.1,
+      "rough": 0.8,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false
+    },
+    {
+      "shape": "box",
+      "position": [
+        0,
+        0.25,
+        0
+      ],
+      "size": [
+        1.6,
+        0.1,
+        1.6
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#f5f5f4",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false
+    },
+    {
+      "shape": "cylinder",
+      "position": [
+        0.65,
+        0.9,
+        0
+      ],
+      "size": [
+        0.14,
+        1.2,
+        0.14
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#fafaf9",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false,
+      "radial": {
+        "count": 12
+      }
+    },
+    {
+      "shape": "cylinder",
+      "position": [
+        0,
+        1.6,
+        0
+      ],
+      "size": [
+        1.55,
+        0.15,
+        1.55
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#e7e5e4",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false
+    },
+    {
+      "shape": "sphere",
+      "position": [
+        0,
+        1.9,
+        0
+      ],
+      "size": [
+        1,
+        0.8,
+        1
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#facc15",
+      "metal": 0.9,
+      "rough": 0.2,
+      "opacity": 1,
+      "glow": 0,
+      "glowAtNight": false
+    },
+    {
+      "shape": "cone",
+      "position": [
+        0,
+        2.45,
+        0
+      ],
+      "size": [
+        0.12,
+        0.35,
+        0.12
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#fde047",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 1.5,
+      "glowAtNight": false
+    },
+    {
+      "shape": "sphere",
+      "position": [
+        0.85,
+        0.35,
+        0.85
+      ],
+      "size": [
+        0.12,
+        0.12,
+        0.12
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "color": "#fb923c",
+      "metal": 0.1,
+      "rough": 0.6,
+      "opacity": 1,
+      "glow": 3,
+      "glowAtNight": true,
+      "radial": {
+        "count": 4
+      }
+    }
+  ]
+}

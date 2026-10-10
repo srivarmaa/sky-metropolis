@@ -7,7 +7,9 @@ import { tileHash } from './houses';
 
 // --- Road network ---
 
-export const isRoadType = (type: BuildingType) => type === BuildingType.Road || type === BuildingType.Roundabout;
+// Bridges carry roads over the river, so traffic, pedestrians and road access cross them
+export const isRoadType = (type: BuildingType) =>
+  type === BuildingType.Road || type === BuildingType.Roundabout || type === BuildingType.Bridge;
 
 export const isRoadAt = (grid: Grid, x: number, y: number) =>
   y >= 0 && y < grid.length && x >= 0 && x < grid[y].length && isRoadType(grid[y][x].buildingType);

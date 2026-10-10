@@ -10,6 +10,20 @@ export enum BuildingType {
   Commercial = 'Commercial',
   Industrial = 'Industrial',
   Park = 'Park',
+  Water = 'Water', // Co-op river and lake between plots; can't be built on
+  Bridge = 'Bridge', // Co-op road over the river between two cities (both players must agree)
+  Monument = 'Monument', // A player-made landmark (see services/assets); may cover several tiles
+}
+
+export type AssetTier = 'monument' | 'grand';
+
+// Stored on the top-left ("anchor") tile of a placed monument
+export interface PlacedMonument {
+  assetId: string;
+  name: string;
+  tier: AssetTier;
+  footprint: [number, number]; // Tiles covered (width along x, depth along y), after rotation
+  rotation: number; // Quarter turns, 0-3
 }
 
 export interface BuildingConfig {
@@ -29,6 +43,11 @@ export interface TileData {
   buildingType: BuildingType;
   // Suggested by AI for visual variety later
   variant?: number;
+  // Co-op: the player slot whose plot this tile belongs to (absent in solo games and on water)
+  owner?: number;
+  // Monuments: the anchor tile holds the details; the other covered tiles point to the anchor
+  monument?: PlacedMonument;
+  anchor?: { x: number; y: number };
 }
 
 export type Grid = TileData[][];
@@ -48,7 +67,12 @@ export interface EconomyReport {
   shopCapacity: number; // What shops could sell with enough paying customers
   spending: number; // Employed citizens' daily shopping money
   upkeep: number; // Daily cost of roads, signals and roundabouts
-  income: number; // Rounded net change to the treasury (income - upkeep)
+  commutersIn: number; // Co-op: workers from bridge-linked cities filling jobs here
+  commutersOut: number; // Co-op: residents working in bridge-linked cities
+  commuteTax: number; // Co-op: wage tax received for residents working elsewhere, minus tax paid for commuters working here
+  tourism: number; // Visitors' spending at open monuments
+  royalties: number; // Co-op: profit-share licence payments received from other cities, minus those paid to creators
+  income: number; // Rounded net change to the treasury (income - upkeep + commute tax)
 }
 
 export interface CityStats {
@@ -64,6 +88,22 @@ export interface AIGoal {
   buildingType?: BuildingType; // If target is building_count
   reward: number;
   completed: boolean;
+}
+
+// --- Co-op ---
+
+export interface CoopPlayer {
+  slot: number; // 0 is the host; also the index of the player's plot
+  name: string;
+  color: string;
+  online: boolean;
+  host?: boolean; // The player whose browser runs the room
+}
+
+// One player's city as simulated by the host
+export interface CoopCity {
+  stats: CityStats;
+  economy: EconomyReport;
 }
 
 export interface NewsItem {

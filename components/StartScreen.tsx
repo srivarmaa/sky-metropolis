@@ -13,9 +13,11 @@ interface StartScreenProps {
   defaultGridSize: number;
   // Shows the chosen map behind the menu
   onPreviewGrid: (grid: Grid) => void;
+  onPlayWithFriends: () => void;
+  onOpenStudio: () => void;
 }
 
-const StartScreen: React.FC<StartScreenProps> = ({ onStart, aiAvailable, defaultGridSize, onPreviewGrid }) => {
+const StartScreen: React.FC<StartScreenProps> = ({ onStart, aiAvailable, defaultGridSize, onPreviewGrid, onPlayWithFriends, onOpenStudio }) => {
   const [aiEnabled, setAiEnabled] = useState(aiAvailable);
   const [gridSize, setGridSize] = useState(defaultGridSize);
   const [uploaded, setUploaded] = useState<{ name: string; layout: SavedLayout } | null>(null);
@@ -155,6 +157,22 @@ const StartScreen: React.FC<StartScreenProps> = ({ onStart, aiAvailable, default
             className="w-full py-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg shadow-cyan-900/20 transform transition-all hover:scale-[1.02] active:scale-[0.98] text-lg tracking-wide"
             >
             {uploaded ? 'Continue Building' : 'Start Building'}
+            </button>
+
+            <button
+              onClick={onPlayWithFriends}
+              className="mt-3 w-full py-3 bg-slate-800/70 hover:bg-slate-700/80 text-cyan-100 font-bold rounded-xl border border-cyan-500/30 hover:border-cyan-400/60 transition-all tracking-wide"
+            >
+              Play with Friends
+              <span className="block text-[10px] font-medium text-slate-400 uppercase tracking-widest mt-0.5">River Cities co-op</span>
+            </button>
+
+            <button
+              onClick={onOpenStudio}
+              className="mt-3 w-full py-3 bg-slate-800/70 hover:bg-slate-700/80 text-violet-100 font-bold rounded-xl border border-violet-500/30 hover:border-violet-400/60 transition-all tracking-wide"
+            >
+              Asset Studio
+              <span className="block text-[10px] font-medium text-slate-400 uppercase tracking-widest mt-0.5">Design your own landmarks · AI skill file</span>
             </button>
 
             <div className="mt-8 text-center">
