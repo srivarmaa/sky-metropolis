@@ -4,10 +4,11 @@
 */
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { Canvas, useFrame, useThree, ThreeElements } from '@react-three/fiber';
-import { MapControls, Environment, SoftShadows, Instance, Instances, Float, useTexture, Outlines, OrthographicCamera, PerspectiveCamera, Billboard } from '@react-three/drei';
+import { MapControls, Environment, SoftShadows, Instance, Instances, Float, useTexture, Outlines, OrthographicCamera, PerspectiveCamera, Billboard, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { MathUtils } from 'three';
-import { Grid, BuildingType, TileData } from '../types';
+import { Grid, BuildingType, TileData, CoopPlayer } from '../types';
+import { plotRects, plotCenter } from '../services/coop/world';
 import { BUILDINGS } from '../constants';
 import { tileHash, getHouseStyle } from '../services/houses';
 import {
@@ -53,6 +54,10 @@ const windowMat = new THREE.MeshStandardMaterial({ color: '#bfdbfe', emissive: W
 const streetLampMat = new THREE.MeshStandardMaterial({ color: '#fef3c7', emissive: '#fde68a', emissiveIntensity: 0.3, toneMapped: false });
 const lampPoolMat = new THREE.MeshBasicMaterial({ color: '#fde68a', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
 const headlightMat = new THREE.MeshBasicMaterial({ color: HEADLIGHT_DAY.clone(), toneMapped: false });
+// Co-op river and lake; shimmers gently and darkens at night (see DayNightCycle)
+const WATER_DAY = new THREE.Color('#38bdf8');
+const WATER_NIGHT = new THREE.Color('#0c1e3a');
+const waterMat = new THREE.MeshStandardMaterial({ color: WATER_DAY.clone(), roughness: 0.08, metalness: 0.35, transparent: true, opacity: 0.92 });
 
 // --- 1. Advanced Procedural Buildings ---
 
@@ -666,6 +671,7 @@ const DayNightCycle = ({ shadowExtent }: { shadowExtent: number }) => {
     streetLampMat.emissiveIntensity = 0.3 + 3 * night;
     lampPoolMat.opacity = 0.3 * night;
     headlightMat.color.copy(HEADLIGHT_DAY).lerp(HEADLIGHT_NIGHT, night);
+    waterMat.color.copy(WATER_NIGHT).lerp(WATER_DAY, day).offsetHSL(0, 0, Math.sin(t * 1.3) * 0.02);
   });
 
   return (
@@ -782,6 +788,9 @@ const benchMat = new THREE.MeshStandardMaterial({ color: '#a16207', roughness: 0
 const shelterGlassMat = new THREE.MeshStandardMaterial({ color: '#bae6fd', transparent: true, opacity: 0.45, roughness: 0.1 });
 const busSignMat = new THREE.MeshStandardMaterial({ color: '#2563eb' });
 const islandGrassMat = new THREE.MeshStandardMaterial({ color: '#4ade80', flatShading: true });
+const bridgePierMat = new THREE.MeshStandardMaterial({ color: '#94a3b8', roughness: 0.8 });
+const railingMat = new THREE.MeshStandardMaterial({ color: '#e2e8f0', metalness: 0.4, roughness: 0.4 });
+const ghostDeckMat = new THREE.MeshBasicMaterial({ color: '#e2e8f0', transparent: true, opacity: 0.45, depthWrite: false });
 
 const TrafficSignal = ({ dir, x, y }: { dir: [number, number]; x: number; y: number }) => {
   const lampRefs = useRef<(THREE.Mesh | null)[]>([]);
@@ -901,6 +910,7 @@ const BusStop = () => (
 const RoadDetails = React.memo(({ x, y, grid, yOffset }: { x: number; y: number; grid: Grid; yOffset: number }) => {
   const connected = roadConnections(grid, x, y);
   const roundabout = grid[y][x].buildingType === BuildingType.Roundabout;
+  const bridge = grid[y][x].buildingType === BuildingType.Bridge;
   const signals = hasSignals(grid, x, y);
   const pavementSides = SIDES.filter(s => !connected[s]);
   const straight = (connected.up && connected.down && !connected.left && !connected.right)
@@ -944,6 +954,14 @@ const RoadDetails = React.memo(({ x, y, grid, yOffset }: { x: number; y: number;
               position={alongX ? [curbMid, PAVEMENT_H / 2 + 0.003, dz * curbOffset] : [dx * curbOffset, PAVEMENT_H / 2 + 0.003, curbMid]}
               scale={alongX ? [curbLen, PAVEMENT_H + 0.006, CURB_W] : [CURB_W, PAVEMENT_H + 0.006, curbLen]}
             />
+            {bridge && (
+              // Railing along the outer edge of a bridge walkway
+              <mesh
+                geometry={boxGeo} material={railingMat} castShadow raycast={noRaycast}
+                position={[dx * 0.485, PAVEMENT_H + 0.05, dz * 0.485]}
+                scale={alongX ? [1, 0.1, 0.02] : [0.02, 0.1, 1]}
+              />
+            )}
           </group>
         );
       })}
@@ -992,9 +1010,9 @@ const RoadDetails = React.memo(({ x, y, grid, yOffset }: { x: number; y: number;
           </group>
 
           {lampSide && <PavementSpot side={lampSide} along={0.25}><StreetLamp /></PavementSpot>}
-          {extraSide && furniture < 0.35 && <PavementSpot side={extraSide} along={extraAlong}><StreetTree /></PavementSpot>}
-          {extraSide && furniture >= 0.35 && furniture < 0.5 && <PavementSpot side={extraSide} along={extraAlong}><Bench /></PavementSpot>}
-          {extraSide && straight && furniture >= 0.5 && furniture < 0.62 && <PavementSpot side={extraSide} along={-0.15}><BusStop /></PavementSpot>}
+          {extraSide && !bridge && furniture < 0.35 && <PavementSpot side={extraSide} along={extraAlong}><StreetTree /></PavementSpot>}
+          {extraSide && !bridge && furniture >= 0.35 && furniture < 0.5 && <PavementSpot side={extraSide} along={extraAlong}><Bench /></PavementSpot>}
+          {extraSide && !bridge && straight && furniture >= 0.5 && furniture < 0.62 && <PavementSpot side={extraSide} along={-0.15}><BusStop /></PavementSpot>}
         </>
       )}
     </group>
@@ -1068,6 +1086,8 @@ const GroundTile = React.memo(({ type, x, y, grid, onHover, onLeave, onClick }: 
   } else if (isRoadType(type)) {
     color = '#374151';
     topY = -0.29; // slightly higher
+  } else if (type === BuildingType.Water) {
+    topY = -0.42; // River and lake sit below the banks
   } else {
     color = '#d1d5db'; // concrete base
     topY = -0.28;
@@ -1075,10 +1095,35 @@ const GroundTile = React.memo(({ type, x, y, grid, onHover, onLeave, onClick }: 
 
   const centerY = topY - thickness/2;
 
+  const pointer = {
+    onPointerEnter: (e: any) => { e.stopPropagation(); onHover(x, y); },
+    onPointerOut: (e: any) => { e.stopPropagation(); onLeave(); },
+    onPointerDown: (e: any) => { e.stopPropagation(); if (e.button === 0) onClick(x, y); },
+  };
+
+  // Bridge: water below, a road deck on piers at street level
+  if (type === BuildingType.Bridge) {
+    const deckH = 0.1;
+    return (
+      <group position={[wx, 0, wz]}>
+        <mesh position={[0, -0.42 - thickness / 2, 0]} material={waterMat} receiveShadow {...pointer}>
+          <boxGeometry args={[1, thickness, 1]} />
+        </mesh>
+        <mesh geometry={cylinderGeo} material={bridgePierMat} position={[0, -0.5, 0]} scale={[0.07, 0.3, 0.07]} castShadow raycast={noRaycast} />
+        <mesh position={[0, -0.29 - deckH / 2, 0]} castShadow receiveShadow {...pointer}>
+          <boxGeometry args={[1, deckH, 1]} />
+          <meshStandardMaterial color="#374151" flatShading roughness={1} />
+          <RoadDetails x={x} y={y} grid={grid} yOffset={deckH / 2 + 0.001} />
+        </mesh>
+      </group>
+    );
+  }
+
   return (
-    <mesh 
-        position={[wx, centerY, wz]} 
-        receiveShadow castShadow
+    <mesh
+        position={[wx, centerY, wz]}
+        receiveShadow castShadow={type !== BuildingType.Water}
+        material={type === BuildingType.Water ? waterMat : undefined}
         onPointerEnter={(e) => { e.stopPropagation(); onHover(x, y); }}
         onPointerOut={(e) => { e.stopPropagation(); onLeave(); }}
         onPointerDown={(e) => {
@@ -1087,7 +1132,7 @@ const GroundTile = React.memo(({ type, x, y, grid, onHover, onLeave, onClick }: 
         }}
     >
       <boxGeometry args={[1, thickness, 1]} />
-      <meshStandardMaterial color={color} flatShading roughness={1} />
+      {type !== BuildingType.Water && <meshStandardMaterial color={color} flatShading roughness={1} />}
       {isRoadType(type) && <RoadDetails x={x} y={y} grid={grid} yOffset={thickness / 2 + 0.001} />}
     </mesh>
   );
@@ -1378,15 +1423,102 @@ const Kbd = ({ children }: { children: React.ReactNode }) => (
   <kbd className="px-1.5 py-0.5 rounded border border-gray-600 bg-gray-800 text-[10px] font-mono font-bold text-gray-100 leading-none">{children}</kbd>
 );
 
+// --- Co-op overlays ---
+
+export interface CoopMapInfo {
+  mySlot: number;
+  plotSize: number;
+  players: CoopPlayer[];
+  cursors: Record<number, { x: number; y: number }>;
+  pendingBridges: { x: number; y: number }[][]; // Proposed bridges waiting for an answer (shown as ghosts)
+}
+
+// A translucent deck where a bridge has been proposed
+const GhostBridge = ({ tiles, size }: { tiles: { x: number; y: number }[]; size: number }) => (
+  <group raycast={noRaycast}>
+    {tiles.map(t => {
+      const [wx, , wz] = gridToWorld(t.x, t.y, size);
+      return <mesh key={`${t.x},${t.y}`} geometry={boxGeo} material={ghostDeckMat} position={[wx, -0.33, wz]} scale={[1, 0.08, 0.7]} raycast={noRaycast} />;
+    })}
+  </group>
+);
+
+const BORDER_Y = -0.265; // Just above building bases and roads
+
+// A coloured outline around each player's plot (yours is thicker), with their name at the corner
+const PlotBorders = ({ coop, size }: { coop: CoopMapInfo; size: number }) => (
+  <group raycast={noRaycast}>
+    {plotRects(coop.plotSize).map(plot => {
+      const player = coop.players.find(p => p.slot === plot.slot);
+      const color = player ? player.color : '#64748b';
+      const width = plot.slot === coop.mySlot ? 0.1 : 0.05;
+      const [cx, , cz] = gridToWorld(plot.x0 + (plot.size - 1) / 2, plot.y0 + (plot.size - 1) / 2, size);
+      const half = plot.size / 2;
+      const [lx, , lz] = gridToWorld(plot.x0, plot.y0, size);
+      return (
+        <group key={plot.slot}>
+          {[[0, -half, plot.size, width], [0, half, plot.size, width], [-half, 0, width, plot.size], [half, 0, width, plot.size]].map(([dx, dz, sx, sz], i) => (
+            <mesh key={i} geometry={boxGeo} position={[cx + dx, BORDER_Y, cz + dz]} scale={[sx, 0.02, sz]} raycast={noRaycast}>
+              <meshBasicMaterial color={color} toneMapped={false} transparent opacity={player?.online === false ? 0.4 : 0.9} />
+            </mesh>
+          ))}
+          <Html position={[lx - 0.3, 0.2, lz - 0.3]} style={{ pointerEvents: 'none' }} zIndexRange={[5, 0]}>
+            <div
+              className="px-2 py-0.5 rounded-full text-[11px] font-bold whitespace-nowrap shadow-lg border border-black/20"
+              style={{ backgroundColor: color, color: '#0f172a', opacity: player?.online === false ? 0.6 : 1 }}
+            >
+              {player ? `${player.name}${plot.slot === coop.mySlot ? ' (you)' : ''}${player.online ? '' : ' · offline'}` : 'Open plot'}
+            </div>
+          </Html>
+        </group>
+      );
+    })}
+  </group>
+);
+
+// Where another player is pointing, with their name
+const RemoteCursor = ({ x, y, size, color, name }: { x: number; y: number; size: number; color: string; name: string }) => {
+  const [wx, , wz] = gridToWorld(x, y, size);
+  return (
+    <group position={[wx, -0.24, wz]}>
+      <mesh rotation={[-Math.PI / 2, 0, Math.PI / 4]} raycast={noRaycast}>
+        <ringGeometry args={[0.6, 0.7, 4]} />
+        <meshBasicMaterial color={color} toneMapped={false} side={THREE.DoubleSide} depthTest={false} transparent />
+      </mesh>
+      <Html position={[0, 0.5, 0]} center style={{ pointerEvents: 'none' }} zIndexRange={[6, 0]}>
+        <div className="px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap shadow" style={{ backgroundColor: color, color: '#0f172a' }}>{name}</div>
+      </Html>
+    </group>
+  );
+};
+
+// Point the camera at your own plot when a co-op game starts
+const FocusOnPlot = ({ target }: { target: [number, number, number] | null }) => {
+  const controls = useThree(state => state.controls) as any;
+  const camera = useThree(state => state.camera);
+  const tx = target?.[0];
+  const tz = target?.[2];
+  useEffect(() => {
+    if (!controls || tx === undefined || tz === undefined) return;
+    const offset = camera.position.clone().sub(controls.target);
+    controls.target.set(tx, -0.5, tz);
+    camera.position.copy(controls.target).add(offset);
+    controls.update();
+  }, [controls, camera, tx, tz]);
+  return null;
+};
+
 interface IsoMapProps {
   grid: Grid;
   onTileClick: (x: number, y: number) => void;
   hoveredTool: BuildingType;
   population: number;
   commuters: number; // Employed citizens; each one adds to traffic
+  coop?: CoopMapInfo; // Co-op game: plot borders, friends' cursors, build only on your own plot
+  onHoverTile?: (tile: { x: number; y: number } | null) => void;
 }
 
-const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, population, commuters }) => {
+const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, population, commuters, coop, onHoverTile }) => {
   const [hoveredTile, setHoveredTile] = useState<{x: number, y: number} | null>(null);
   const [cameraView, setCameraView] = useState<CameraView>('3d');
   const [rotateRequest, setRotateRequest] = useState({ id: 0, step: 0 });
@@ -1443,8 +1575,31 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
   const tileLeave = walking ? noop : handleLeave;
   const tileClick = walking ? noop : onTileClick;
 
+  // Co-op: share where you point, and only allow building on your own plot
+  const onHoverTileRef = useRef(onHoverTile);
+  onHoverTileRef.current = onHoverTile;
+  const hoverX = hoveredTile?.x;
+  const hoverY = hoveredTile?.y;
+  useEffect(() => {
+    onHoverTileRef.current?.(hoverX === undefined || hoverY === undefined ? null : { x: hoverX, y: hoverY });
+  }, [hoverX, hoverY]);
+
+  const hoveredData = hoveredTile ? grid[hoveredTile.y]?.[hoveredTile.x] : undefined;
+  // In co-op: your own land; the river for the Bridge tool; a bridge for bulldozing (both become proposals)
+  const canEditHovered = !!hoveredData && (
+    hoveredTool === BuildingType.Bridge ? hoveredData.buildingType === BuildingType.Water
+    : hoveredData.buildingType === BuildingType.Bridge ? hoveredTool === BuildingType.None
+    : hoveredData.buildingType !== BuildingType.Water && (!coop || hoveredData.owner === coop.mySlot)
+  );
+
+  const focusTarget = useMemo(() => {
+    if (!coop) return null;
+    const [gx, gy] = plotCenter(coop.plotSize, coop.mySlot);
+    return gridToWorld(gx, gy, grid.length);
+  }, [coop?.plotSize, coop?.mySlot, grid.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Preview Logic
-  const showPreview = hoveredTile && grid[hoveredTile.y][hoveredTile.x].buildingType === BuildingType.None && hoveredTool !== BuildingType.None;
+  const showPreview = hoveredTile && canEditHovered && grid[hoveredTile.y][hoveredTile.x].buildingType === BuildingType.None && hoveredTool !== BuildingType.None;
   const previewColor = showPreview ? BUILDINGS[hoveredTool].color : 'white';
   const isBulldoze = hoveredTool === BuildingType.None;
   
@@ -1484,6 +1639,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
               target={[0,-0.5,0]}
             />
             <CameraRig view={cameraView} rotateRequest={rotateRequest} />
+            <FocusOnPlot target={focusTarget} />
           </>
         )}
 
@@ -1511,7 +1667,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
                 
                 {/* Building visual - apply world position to group to align with ground tile */}
                 <group position={[wx, 0, wz]} raycast={() => null}>
-                    {tile.buildingType !== BuildingType.None && !isRoadType(tile.buildingType) && (
+                    {tile.buildingType !== BuildingType.None && tile.buildingType !== BuildingType.Water && !isRoadType(tile.buildingType) && (
                       <ProceduralBuilding 
                         type={tile.buildingType} 
                         baseColor={BUILDINGS[tile.buildingType].color} 
@@ -1529,6 +1685,20 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
           <group raycast={() => null}>
             <TrafficSystem grid={grid} carCount={carCount} />
             <PopulationSystem population={population} grid={grid} />
+
+            {coop && <PlotBorders coop={coop} size={gridSize} />}
+            {coop && coop.pendingBridges.map((tiles: { x: number; y: number }[], i: number) => (
+              <group key={i}><GhostBridge tiles={tiles} size={gridSize} /></group>
+            ))}
+            {coop && (Object.entries(coop.cursors) as [string, { x: number; y: number }][]).map(([slot, tile]) => {
+              const player = coop.players.find((p: CoopPlayer) => p.slot === Number(slot));
+              if (!player || Number(slot) === coop.mySlot) return null;
+              return (
+                <group key={slot}>
+                  <RemoteCursor x={tile.x} y={tile.y} size={gridSize} color={player.color} name={player.name} />
+                </group>
+              );
+            })}
 
             {/* Placement Preview */}
             {showPreview && hoveredTile && (
@@ -1552,7 +1722,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
                 x={hoveredTile.x} 
                 y={hoveredTile.y} 
                 size={gridSize}
-                color={isBulldoze ? '#ef4444' : (showPreview ? '#ffffff' : '#000000')} 
+                color={!canEditHovered ? '#64748b' : isBulldoze ? '#ef4444' : (showPreview ? '#ffffff' : '#000000')}
               />
             )}
           </group>

@@ -36,11 +36,13 @@ export interface CityAnalysis {
   signals: number; // Junctions with traffic signals
 }
 
-export const analyzeCity = (grid: Grid): CityAnalysis => {
+// In co-op, pass `owner` to analyse just that player's plot
+export const analyzeCity = (grid: Grid, owner?: number): CityAnalysis => {
   const city: CityAnalysis = { counts: {}, activeCounts: {}, housing: 0, pollutedHomes: 0, unconnected: 0, roads: 0, signals: 0 };
 
-  grid.forEach(row => row.forEach(({ x, y, buildingType: type }) => {
-    if (type === BuildingType.None) return;
+  grid.forEach(row => row.forEach(({ x, y, buildingType: type, owner: tileOwner }) => {
+    if (type === BuildingType.None || type === BuildingType.Water) return;
+    if (owner !== undefined && tileOwner !== owner) return;
     city.counts[type] = (city.counts[type] || 0) + 1;
 
     if (isRoadType(type)) {

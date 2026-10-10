@@ -10,6 +10,8 @@ export enum BuildingType {
   Commercial = 'Commercial',
   Industrial = 'Industrial',
   Park = 'Park',
+  Water = 'Water', // Co-op river and lake between plots; can't be built on
+  Bridge = 'Bridge', // Co-op road over the river between two cities (both players must agree)
 }
 
 export interface BuildingConfig {
@@ -29,6 +31,8 @@ export interface TileData {
   buildingType: BuildingType;
   // Suggested by AI for visual variety later
   variant?: number;
+  // Co-op: the player slot whose plot this tile belongs to (absent in solo games and on water)
+  owner?: number;
 }
 
 export type Grid = TileData[][];
@@ -48,7 +52,10 @@ export interface EconomyReport {
   shopCapacity: number; // What shops could sell with enough paying customers
   spending: number; // Employed citizens' daily shopping money
   upkeep: number; // Daily cost of roads, signals and roundabouts
-  income: number; // Rounded net change to the treasury (income - upkeep)
+  commutersIn: number; // Co-op: workers from bridge-linked cities filling jobs here
+  commutersOut: number; // Co-op: residents working in bridge-linked cities
+  commuteTax: number; // Co-op: wage tax received for residents working elsewhere, minus tax paid for commuters working here
+  income: number; // Rounded net change to the treasury (income - upkeep + commute tax)
 }
 
 export interface CityStats {
@@ -64,6 +71,22 @@ export interface AIGoal {
   buildingType?: BuildingType; // If target is building_count
   reward: number;
   completed: boolean;
+}
+
+// --- Co-op ---
+
+export interface CoopPlayer {
+  slot: number; // 0 is the host; also the index of the player's plot
+  name: string;
+  color: string;
+  online: boolean;
+  host?: boolean; // The player whose browser runs the room
+}
+
+// One player's city as simulated by the host
+export interface CoopCity {
+  stats: CityStats;
+  economy: EconomyReport;
 }
 
 export interface NewsItem {

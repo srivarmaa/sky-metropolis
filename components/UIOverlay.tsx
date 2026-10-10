@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useEffect, useRef } from 'react';
-import { BuildingType, CityStats, AIGoal, NewsItem, EconomyReport } from '../types';
+import { BuildingType, CityStats, AIGoal, NewsItem, EconomyReport, CoopCity, CoopPlayer } from '../types';
 import { BUILDINGS } from '../constants';
 import { DownloadIcon } from './Icons';
+import { DealsPanel, DealsInfo } from './CoopPanels';
 
 interface UIOverlayProps {
   stats: CityStats;
@@ -18,7 +19,67 @@ interface UIOverlayProps {
   aiEnabled: boolean;
   onSaveLayout: () => void;
   economy: EconomyReport;
+  coop?: CoopInfo; // Co-op game: shows the players panel instead of the AI advisor
 }
+
+export interface CoopInfo {
+  roomCode: string;
+  players: CoopPlayer[];
+  cities: Record<number, CoopCity>;
+  mySlot: number;
+  isHost: boolean;
+  deals: DealsInfo;
+}
+
+const PlayersPanel: React.FC<{ coop: CoopInfo }> = ({ coop }) => {
+  const [copied, setCopied] = React.useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(coop.roomCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* Clipboard blocked: the code is still visible */ }
+  };
+
+  return (
+    <div className="w-full md:w-80 bg-slate-900/90 text-white rounded-xl border-2 border-cyan-500/40 shadow-[0_0_20px_rgba(34,211,238,0.25)] backdrop-blur-md overflow-hidden">
+      <div className="bg-slate-800/80 px-3 md:px-4 py-1.5 md:py-2 flex justify-between items-center border-b border-slate-700">
+        <span className="font-bold uppercase text-[10px] md:text-xs tracking-widest">River Cities</span>
+        <button
+          onClick={copy}
+          title="Copy the room code to invite more friends"
+          className="text-[10px] md:text-xs font-mono font-bold text-cyan-200 hover:text-white bg-slate-900/60 px-2 py-0.5 rounded border border-slate-600"
+        >
+          {copied ? 'Copied' : coop.roomCode}
+        </button>
+      </div>
+      <ul className="p-2 md:p-3 flex flex-col gap-1.5">
+        {coop.players.map(p => {
+          const city = coop.cities[p.slot];
+          const income = city?.economy.income ?? 0;
+          return (
+            <li key={p.slot} className={`flex items-center gap-2 text-xs md:text-sm rounded-lg px-2 py-1 ${p.slot === coop.mySlot ? 'bg-white/5' : ''}`}>
+              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: p.color, opacity: p.online ? 1 : 0.4 }} />
+              <span className={`font-bold truncate flex-1 ${p.online ? '' : 'text-gray-500'}`}>
+                {p.name}
+                {p.slot === coop.mySlot && <span className="ml-1 text-[9px] text-gray-400 font-normal uppercase">you</span>}
+                {!p.online && <span className="ml-1 text-[9px] text-gray-500 font-normal uppercase">offline</span>}
+              </span>
+              {city && (
+                <span className="font-mono text-[10px] md:text-xs text-right whitespace-nowrap" title={`${city.stats.population} citizens · $${city.stats.money.toLocaleString()} in the treasury`}>
+                  <span className="text-blue-300">{city.stats.population}</span>
+                  <span className="text-gray-500"> · </span>
+                  <span className="text-green-400">${city.stats.money.toLocaleString()}</span>
+                  <span className={income < 0 ? 'text-red-400' : 'text-green-300/70'}> {income >= 0 ? '+' : '−'}{Math.abs(income)}</span>
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+};
 
 const tools = [
   BuildingType.None, // Bulldoze
@@ -59,6 +120,7 @@ const ToolButton: React.FC<{
         {isBulldoze && <div className="w-full h-full bg-red-600 text-white flex justify-center items-center font-bold text-base md:text-lg">✕</div>}
         {type === BuildingType.Road && <div className="w-full h-2 bg-gray-800 transform -rotate-45"></div>}
         {type === BuildingType.Roundabout && <div className="w-3.5 h-3.5 md:w-4 md:h-4 rounded-full bg-green-500 border-2 border-white/90"></div>}
+        {type === BuildingType.Bridge && <div className="w-full h-full bg-sky-400 flex items-center"><div className="w-full h-2 bg-gray-700 border-y border-white/80"></div></div>}
       </div>
       <span className="text-[8px] md:text-[10px] font-bold text-white uppercase tracking-wider drop-shadow-md leading-none">{config.name}</span>
       {config.cost > 0 && (
@@ -78,7 +140,8 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
   isGeneratingGoal,
   aiEnabled,
   onSaveLayout,
-  economy
+  economy,
+  coop
 }) => {
   const newsRef = useRef<HTMLDivElement>(null);
 
@@ -151,7 +214,9 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
           <div className="w-px h-6 md:h-8 bg-gray-700"></div>
           <button
             onClick={onSaveLayout}
-            title="Download this city as a layout file (load it from the main menu)"
+            title={coop
+              ? 'Download this co-op world with every city in it. Continue it later: Play with Friends → Host a room → Load saved world.'
+              : 'Download this city as a layout file (load it from the main menu)'}
             aria-label="Save layout"
             className="flex flex-col items-center justify-center gap-1 w-10 h-10 md:w-12 md:h-12 text-gray-200 bg-gray-900/80 hover:bg-gray-800 border-2 border-gray-600 hover:border-gray-500 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
           >
@@ -160,7 +225,13 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
           </button>
         </div>
 
-        {/* AI Goal Panel */}
+        {coop ? (
+          <div className="flex flex-col gap-2 w-full md:w-80">
+            <PlayersPanel coop={coop} />
+            <DealsPanel info={coop.deals} />
+          </div>
+        ) : (
+        /* AI Goal Panel */
         <div className={`w-full md:w-80 bg-indigo-900/90 text-white rounded-xl border-2 border-indigo-500/50 shadow-[0_0_20px_rgba(99,102,241,0.4)] backdrop-blur-md overflow-hidden transition-all ${!aiEnabled ? 'opacity-80 grayscale-[0.5]' : ''}`}>
           <div className="bg-indigo-800/80 px-3 md:px-4 py-1.5 md:py-2 flex justify-between items-center border-b border-indigo-600">
             <span className="font-bold uppercase text-[10px] md:text-xs tracking-widest flex items-center gap-2 shadow-sm">
@@ -222,6 +293,7 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
             )}
           </div>
         </div>
+        )}
       </div>
 
       {/* Bottom Bar: Tools & News */}
@@ -249,7 +321,7 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
         
         <div className="flex gap-1 md:gap-2 bg-gray-900/80 p-1 md:p-2 rounded-2xl border border-gray-600/50 backdrop-blur-xl shadow-2xl w-full md:w-auto overflow-x-auto no-scrollbar justify-start md:justify-start">
           <div className="flex gap-1 md:gap-2 min-w-max px-1">
-            {tools.map((type) => (
+            {(coop ? [...tools, BuildingType.Bridge] : tools).map((type) => (
               <ToolButton
                 key={type}
                 type={type}

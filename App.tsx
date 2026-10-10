@@ -3,26 +3,21 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Grid, BuildingType, CityStats, AIGoal, NewsItem, EconomyReport } from './types';
-import { GRID_SIZE, BUILDINGS, TICK_RATE_MS, INITIAL_MONEY } from './constants';
+import { Grid, BuildingType, CityStats, AIGoal, NewsItem, EconomyReport, TileData, CoopCity } from './types';
+import { GRID_SIZE, TICK_RATE_MS, INITIAL_MONEY } from './constants';
 import IsoMap from './components/IsoMap';
 import UIOverlay from './components/UIOverlay';
 import StartScreen from './components/StartScreen';
+import CoopLobby from './components/CoopLobby';
 import { generateCityGoal, generateNewsEvent, isAiAvailable } from './services/geminiService';
 import { createEmptyGrid, downloadLayout } from './services/layoutFile';
-import { computeEconomy, computePopulation, findEconomyProblems, EconomyProblem, EMPTY_ECONOMY } from './services/economy';
+import { computeEconomy, computePopulation, findCityProblems, CityProblem, CITY_PROBLEM_NEWS, EMPTY_ECONOMY } from './services/economy';
 import { analyzeCity } from './services/city';
+import { tryBuild } from './services/build';
+import { useCoopGame } from './services/coop/useCoopGame';
+import { bridgeIsLinked } from './services/coop/hostSim';
 
-type CityProblem = EconomyProblem | 'treasury_empty';
-
-const ECONOMY_PROBLEM_NEWS: Record<CityProblem, string> = {
-  idle_factories: 'Factories are idle: no workers. Build houses to bring in citizens.',
-  shops_no_customers: 'Shops have no paying customers. Citizens need jobs before they can spend.',
-  no_road_access: 'Some buildings have no road next to them and sit empty. Connect them with a road.',
-  traffic_jam: 'Traffic jams! Commuters are clogging the roads and factory deliveries are slowing down. Build more roads.',
-  pollution: 'Factory smog is driving families out of nearby houses. A park next to those homes cleans the air.',
-  treasury_empty: 'The treasury is empty: road and signal upkeep is going unpaid. Grow income or bulldoze unused roads.',
-};
+const newsId = () => `${Date.now()}.${Math.random().toString().slice(2)}`;
 
 function App() {
   // --- Game State ---
@@ -58,6 +53,32 @@ function App() {
     setNewsFeed(prev => [...prev.slice(-12), item]); // Keep last few
   }, []);
 
+  // Map updates also refresh the ref right away, so several builds in a row see each other
+  const setWorld = useCallback((g: Grid) => {
+    gridRef.current = g;
+    setGrid(g);
+  }, []);
+  const applyTiles = useCallback((tiles: TileData[]) => {
+    const g = gridRef.current.map(row => row.slice());
+    tiles.forEach(t => { if (g[t.y]?.[t.x]) g[t.y][t.x] = t; });
+    setWorld(g);
+  }, [setWorld]);
+
+  // --- Co-op (River Cities) ---
+  const [showLobby, setShowLobby] = useState(false);
+  const coop = useCoopGame({
+    getGrid: () => gridRef.current,
+    setWorld,
+    applyTiles,
+    addNews: (text, kind) => addNewsItem({ id: newsId(), text, type: kind }),
+    onStart: () => {
+      setAiEnabled(false); // The AI advisor is solo-only for now
+      setShowLobby(false);
+      setGameStarted(true);
+    },
+  });
+  const coopRef = useRef(coop);
+  coopRef.current = coop;
   const fetchNewGoal = useCallback(async () => {
     if (isGeneratingGoal || !aiEnabledRef.current) return;
     setIsGeneratingGoal(true);
@@ -100,6 +121,12 @@ function App() {
     if (!gameStarted) return;
 
     const intervalId = setInterval(() => {
+      // Co-op: the host simulates every city; clients wait for its updates
+      if (coopRef.current.active) {
+        coopRef.current.hostTick();
+        return;
+      }
+
       // 1. Analyse the city (road access, pollution) and update population (limited by homes and jobs)
       const city = analyzeCity(gridRef.current);
       const buildingCounts = city.counts;
@@ -112,10 +139,9 @@ function App() {
       setEconomy(report);
 
       // Announce economy problems once, when they first appear
-      const problems: CityProblem[] = findEconomyProblems(city, report);
-      if (statsRef.current.money + report.income <= 0 && report.income < 0) problems.push('treasury_empty');
+      const problems = findCityProblems(city, report, Math.max(0, statsRef.current.money + report.income));
       problems.filter(p => !economyProblemsRef.current.includes(p)).forEach(p => {
-        addNewsItem({ id: Date.now().toString() + Math.random(), text: ECONOMY_PROBLEM_NEWS[p], type: 'negative' });
+        addNewsItem({ id: newsId(), text: CITY_PROBLEM_NEWS[p], type: 'negative' });
       });
       economyProblemsRef.current = problems;
 
@@ -159,63 +185,21 @@ function App() {
   const handleTileClick = useCallback((x: number, y: number) => {
     if (!gameStarted) return; // Prevent clicking through start screen
 
-    const currentGrid = gridRef.current;
-    const currentStats = statsRef.current;
-    const tool = selectedTool; // Capture current tool
-    
-    if (y < 0 || y >= currentGrid.length || x < 0 || x >= currentGrid[y].length) return;
-
-    const currentTile = currentGrid[y][x];
-    const buildingConfig = BUILDINGS[tool];
-
-    // Bulldoze logic
-    if (tool === BuildingType.None) {
-      if (currentTile.buildingType !== BuildingType.None) {
-        const demolishCost = 5;
-        if (currentStats.money >= demolishCost) {
-            const newGrid = currentGrid.map(row => [...row]);
-            newGrid[y][x] = { ...currentTile, buildingType: BuildingType.None };
-            setGrid(newGrid);
-            setStats(prev => ({ ...prev, money: prev.money - demolishCost }));
-            // Sound effect here
-        } else {
-            addNewsItem({id: Date.now().toString(), text: "Cannot afford demolition costs.", type: 'negative'});
-        }
-      }
+    // Co-op: the host checks and applies every build (clients just send the request)
+    if (coopRef.current.active) {
+      coopRef.current.requestBuild(x, y, selectedTool);
       return;
     }
 
-    // Upgrade an existing road to a roundabout, paying only the difference
-    if (tool === BuildingType.Roundabout && currentTile.buildingType === BuildingType.Road) {
-      const upgradeCost = buildingConfig.cost - BUILDINGS[BuildingType.Road].cost;
-      if (currentStats.money >= upgradeCost) {
-        setStats(prev => ({ ...prev, money: prev.money - upgradeCost }));
-        const newGrid = currentGrid.map(row => [...row]);
-        newGrid[y][x] = { ...currentTile, buildingType: tool };
-        setGrid(newGrid);
-      } else {
-        addNewsItem({id: Date.now().toString() + Math.random(), text: `Treasury insufficient for a roundabout upgrade ($${upgradeCost}).`, type: 'negative'});
-      }
+    // Bulldoze, roundabout upgrade or placement (see services/build.ts)
+    const result = tryBuild(gridRef.current, statsRef.current.money, x, y, selectedTool, null);
+    if (!result.ok) {
+      if (result.reason) addNewsItem({ id: newsId(), text: result.reason, type: 'negative' });
       return;
     }
-
-    // Placement Logic
-    if (currentTile.buildingType === BuildingType.None) {
-      if (currentStats.money >= buildingConfig.cost) {
-        // Deduct cost
-        setStats(prev => ({ ...prev, money: prev.money - buildingConfig.cost }));
-        
-        // Place building
-        const newGrid = currentGrid.map(row => [...row]);
-        newGrid[y][x] = { ...currentTile, buildingType: tool };
-        setGrid(newGrid);
-        // Sound effect here
-      } else {
-        // Not enough money feedback
-        addNewsItem({id: Date.now().toString() + Math.random(), text: `Treasury insufficient for ${buildingConfig.name}.`, type: 'negative'});
-      }
-    }
-  }, [selectedTool, addNewsItem, gameStarted]);
+    applyTiles([result.tile]);
+    setStats(prev => ({ ...prev, money: prev.money - result.cost }));
+  }, [selectedTool, addNewsItem, gameStarted, applyTiles]);
 
   const handleClaimReward = () => {
     if (currentGoal && currentGoal.completed) {
@@ -233,30 +217,61 @@ function App() {
     setGameStarted(true);
   };
 
+  // In co-op, the stats bar shows your own city as simulated by the host
+  const myCity = coop.active && coop.mySlot !== null ? coop.cities[coop.mySlot] : undefined;
+  const shownStats = myCity?.stats ?? stats;
+  const shownEconomy = myCity?.economy ?? economy;
+  // Traffic and pedestrians on the map reflect every city
+  const allCities = Object.values(coop.cities) as CoopCity[];
+  const mapPopulation = coop.active ? allCities.reduce((n, c) => n + c.stats.population, 0) : stats.population;
+  const mapCommuters = coop.active ? allCities.reduce((n, c) => n + c.economy.workers, 0) : economy.workers;
+
+  // Co-op saves the whole world (every city) so the group can continue it later from the lobby
   const handleSaveLayout = useCallback(() => {
-    downloadLayout(gridRef.current, statsRef.current);
+    if (coopRef.current.active) coopRef.current.exportSave();
+    else downloadLayout(gridRef.current, statsRef.current);
   }, []);
+
+  const backToSoloMenu = () => {
+    setShowLobby(false);
+    setWorld(createEmptyGrid(GRID_SIZE));
+  };
 
   return (
     <div className="relative w-screen h-screen overflow-hidden selection:bg-transparent selection:text-transparent bg-sky-900">
       {/* 3D Rendering Layer - Always visible now, providing background for start screen */}
-      <IsoMap 
-        grid={grid} 
-        onTileClick={handleTileClick} 
+      <IsoMap
+        grid={grid}
+        onTileClick={handleTileClick}
         hoveredTool={selectedTool}
-        population={stats.population}
-        commuters={economy.workers}
+        population={mapPopulation}
+        commuters={mapCommuters}
+        coop={coop.active && coop.mySlot !== null
+          ? {
+              mySlot: coop.mySlot, plotSize: coop.plotSize, players: coop.players, cursors: coop.cursors,
+              pendingBridges: coop.proposals.flatMap(p => (p.deal.kind === 'bridge' ? [p.deal.tiles] : [])),
+            }
+          : undefined}
+        onHoverTile={coop.active ? coop.sendCursor : undefined}
       />
-      
-      {/* Start Screen Overlay */}
-      {!gameStarted && (
-        <StartScreen onStart={handleStart} aiAvailable={isAiAvailable} defaultGridSize={GRID_SIZE} onPreviewGrid={setGrid} />
-      )}
+
+      {/* Start Screen / Co-op lobby */}
+      {!gameStarted && (showLobby ? (
+        <CoopLobby coop={coop} onBack={backToSoloMenu} />
+      ) : (
+        <StartScreen
+          onStart={handleStart}
+          aiAvailable={isAiAvailable}
+          defaultGridSize={GRID_SIZE}
+          onPreviewGrid={setWorld}
+          onPlayWithFriends={() => setShowLobby(true)}
+        />
+      ))}
 
       {/* UI Layer */}
       {gameStarted && (
         <UIOverlay
-          stats={stats}
+          stats={shownStats}
           selectedTool={selectedTool}
           onSelectTool={setSelectedTool}
           currentGoal={currentGoal}
@@ -265,8 +280,38 @@ function App() {
           isGeneratingGoal={isGeneratingGoal}
           aiEnabled={aiEnabled}
           onSaveLayout={handleSaveLayout}
-          economy={economy}
+          economy={shownEconomy}
+          coop={coop.active && coop.mySlot !== null
+            ? {
+                roomCode: coop.roomCode, players: coop.players, cities: coop.cities, mySlot: coop.mySlot, isHost: coop.role === 'host',
+                deals: {
+                  mySlot: coop.mySlot,
+                  players: coop.players,
+                  proposals: coop.proposals,
+                  bridges: coop.bridges.map(b => ({ ...b, linked: bridgeIsLinked(grid, b) })),
+                  clockOffset: coop.clockOffset,
+                  economy: shownEconomy,
+                  onRespond: coop.respond,
+                  onCancel: coop.cancel,
+                  onPropose: coop.propose,
+                },
+              }
+            : undefined}
         />
+      )}
+
+      {/* The host left: the world stays on screen and can be saved */}
+      {coop.phase === 'ended' && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6">
+          <div className="max-w-sm w-full bg-slate-900/95 border border-slate-700 rounded-2xl p-6 text-white shadow-2xl text-center" role="alertdialog" aria-labelledby="host-left-title">
+            <h2 id="host-left-title" className="text-xl font-black mb-2">The host left the room</h2>
+            <p className="text-sm text-slate-400 mb-5">The game has ended. Download the world to continue it later: anyone can host it again from Play with Friends → Load saved world.</p>
+            <div className="flex flex-col gap-2">
+              <button onClick={handleSaveLayout} className="w-full py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 font-bold">Download world</button>
+              <button onClick={() => window.location.reload()} className="w-full py-2.5 rounded-lg bg-slate-700 hover:bg-slate-600 font-bold">Back to menu</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* CSS for animations and utility */}

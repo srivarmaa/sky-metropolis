@@ -7,7 +7,7 @@ import { BuildingType, CityStats, Grid } from '../types';
 export const GRID_SIZE_OPTIONS = [10, 20, 30, 40, 50];
 const MIN_GRID_SIZE = 5;
 const MAX_GRID_SIZE = 60;
-const LAYOUT_FORMAT = 'sky-metropolis-layout';
+export const LAYOUT_FORMAT = 'sky-metropolis-layout';
 const LAYOUT_VERSION = 1;
 
 // One character per tile keeps saved files small and readable/editable by hand
@@ -19,10 +19,17 @@ const TILE_CODES: Record<BuildingType, string> = {
   [BuildingType.Commercial]: 'C',
   [BuildingType.Industrial]: 'I',
   [BuildingType.Park]: 'P',
+  [BuildingType.Water]: '~',
+  [BuildingType.Bridge]: 'B',
 };
 const CODE_TO_TYPE = Object.fromEntries(
   Object.entries(TILE_CODES).map(([type, code]) => [code, type as BuildingType])
 ) as Record<string, BuildingType>;
+
+// Compact row strings (one character per tile), also used to send co-op worlds over the network
+export const encodeRows = (grid: Grid): string[] => grid.map(row => row.map(tile => TILE_CODES[tile.buildingType]).join(''));
+export const tileCode = (type: BuildingType) => TILE_CODES[type];
+export const typeFromCode = (code: string): BuildingType | undefined => CODE_TO_TYPE[code];
 
 export interface SavedLayout {
   grid: Grid;
@@ -40,7 +47,7 @@ export const serializeLayout = (grid: Grid, stats: CityStats): string =>
     version: LAYOUT_VERSION,
     gridSize: grid.length,
     stats,
-    rows: grid.map(row => row.map(tile => TILE_CODES[tile.buildingType]).join('')),
+    rows: encodeRows(grid),
     legend: Object.fromEntries(Object.entries(TILE_CODES).map(([type, code]) => [code, type])),
   }, null, 2);
 
@@ -56,6 +63,9 @@ export const parseLayout = (text: string): SavedLayout => {
   }
   if (data?.format !== LAYOUT_FORMAT || !Array.isArray(data.rows)) {
     throw new Error('This file is not a SkyMetropolis layout.');
+  }
+  if (data.mode === 'coop') {
+    throw new Error('This is a co-op world. Load it from Play with Friends → Host a room.');
   }
 
   const rows: unknown[] = data.rows;

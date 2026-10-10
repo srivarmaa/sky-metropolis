@@ -1,0 +1,43 @@
+{
+  "format": "sky-metropolis-layout",
+  "version": 1,
+  "gridSize": 20,
+  "stats": {
+    "money": 5000,
+    "population": 0,
+    "day": 1
+  },
+  "rows": [
+    "..R......R..~~..R...",
+    "HHRHHHHHHR..~~..R...",
+    "RRRRRRRRRRRRBBRRRRRR",
+    "HHRHHHHHHRC.~~..R...",
+    "..RP.H...RC.~~..R...",
+    "..R......RC.~~..R...",
+    "HHRHHHHHHRC.~~..R...",
+    "RRRRRRRRRORR~~RRRRRR",
+    "HHRHHHHHHRC.~~..R...",
+    "P.R.....PRC.~~..R...",
+    "..R......R..~~..R...",
+    "HHRHHHHHHR..~~HHR...",
+    "RRRRRRRRRRRRBBRRRRRR",
+    "HHRHHHHHHR..~~.IRIH.",
+    "..R......R..~~.IRI..",
+    "..R......R..~~..R..P",
+    "..R......R..~~..R.IH",
+    "RRRRRRRRRRRR~~RRRRRR",
+    "..R......R..~~..R...",
+    "..R......R..~~..R..."
+  ],
+  "legend": {
+    ".": "None",
+    "R": "Road",
+    "O": "Roundabout",
+    "H": "Residential",
+    "C": "Commercial",
+    "I": "Industrial",
+    "P": "Park",
+    "~": "Water",
+    "B": "Bridge"
+  }
+}

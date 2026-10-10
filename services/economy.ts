@@ -17,10 +17,11 @@ const sumConfig = (buildingCounts: Record<string, number>, key: 'jobs' | 'popGen
  * - Houses and parks set how fast they move in; if jobs disappear, people gradually move out.
  * - Population never exceeds housing (see analyzeCity): homeless citizens leave immediately.
  * - Only buildings with road access count (city.activeCounts).
+ * - Co-op: `extraJobs` are open jobs in bridge-linked cities that residents can commute to.
  */
-export const computePopulation = (city: CityAnalysis, prevPop: number): number => {
+export const computePopulation = (city: CityAnalysis, prevPop: number, extraJobs = 0): number => {
   const { activeCounts, housing } = city;
-  const jobs = sumConfig(activeCounts, 'jobs');
+  const jobs = sumConfig(activeCounts, 'jobs') + Math.max(0, extraJobs);
   const houses = activeCounts[BuildingType.Residential] || 0;
   const target = Math.min(housing, jobs + houses * JOBLESS_PER_HOUSE);
 
@@ -39,13 +40,16 @@ export const computePopulation = (city: CityAnalysis, prevPop: number): number =
  * - Factories produce in proportion to how well they are staffed, and lose output when commuters jam the roads.
  * - Shops need staff too, and can only sell what employed citizens can afford to spend.
  * - Roads and signals cost upkeep every day.
+ * - Co-op: `commutersIn` workers from bridge-linked cities fill jobs after local residents.
  */
-export const computeEconomy = (city: CityAnalysis, population: number): EconomyReport => {
+export const computeEconomy = (city: CityAnalysis, population: number, commutersIn = 0): EconomyReport => {
   const factories = city.activeCounts[BuildingType.Industrial] || 0;
   const shops = city.activeCounts[BuildingType.Commercial] || 0;
 
   const jobs = factories * BUILDINGS[BuildingType.Industrial].jobs + shops * BUILDINGS[BuildingType.Commercial].jobs;
-  const workers = Math.min(Math.max(0, population), jobs);
+  const residentWorkers = Math.min(Math.max(0, population), jobs);
+  const inbound = Math.min(Math.max(0, commutersIn), jobs - residentWorkers);
+  const workers = residentWorkers + inbound;
   const staffing = jobs > 0 ? workers / jobs : 0;
 
   // Every worker commutes; past road capacity, deliveries slow down
@@ -73,6 +77,9 @@ export const computeEconomy = (city: CityAnalysis, population: number): EconomyR
     shopCapacity,
     spending,
     upkeep,
+    commutersIn: inbound,
+    commutersOut: 0,
+    commuteTax: 0,
     income: Math.round(factoryIncome + shopIncome - upkeep),
   };
 };
@@ -81,6 +88,23 @@ export const EMPTY_ECONOMY: EconomyReport = computeEconomy(
   { counts: {}, activeCounts: {}, housing: 0, pollutedHomes: 0, unconnected: 0, roads: 0, signals: 0 }, 0);
 
 export type EconomyProblem = 'idle_factories' | 'shops_no_customers' | 'no_road_access' | 'traffic_jam' | 'pollution';
+export type CityProblem = EconomyProblem | 'treasury_empty';
+
+export const CITY_PROBLEM_NEWS: Record<CityProblem, string> = {
+  idle_factories: 'Factories are idle: no workers. Build houses to bring in citizens.',
+  shops_no_customers: 'Shops have no paying customers. Citizens need jobs before they can spend.',
+  no_road_access: 'Some buildings have no road next to them and sit empty. Connect them with a road.',
+  traffic_jam: 'Traffic jams! Commuters are clogging the roads and factory deliveries are slowing down. Build more roads.',
+  pollution: 'Factory smog is driving families out of nearby houses. A park next to those homes cleans the air.',
+  treasury_empty: 'The treasury is empty: road and signal upkeep is going unpaid. Grow income or bulldoze unused roads.',
+};
+
+// Problems for one day's report; `money` is the treasury after this day's income
+export const findCityProblems = (city: CityAnalysis, report: EconomyReport, money: number): CityProblem[] => {
+  const problems: CityProblem[] = findEconomyProblems(city, report);
+  if (money <= 0 && report.income < 0) problems.push('treasury_empty');
+  return problems;
+};
 
 // Conditions worth telling the player about in the news feed
 export const findEconomyProblems = (city: CityAnalysis, report: EconomyReport): EconomyProblem[] => {

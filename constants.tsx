@@ -23,6 +23,17 @@ export const SIGNAL_UPKEEP = 1; // Per junction with traffic signals per day (ro
 export const ROAD_CAPACITY = 10; // Commuters each road tile carries before traffic jams
 export const MIN_DELIVERY_EFFICIENCY = 0.4; // Worst-case factory output in gridlock
 
+// Co-op: up to 4 players, each with a square plot; plots are separated by a river that meets in a central lake
+export const MAX_PLAYERS = 4;
+export const COOP_PLOT_SIZES = [10, 15, 20, 25];
+export const COOP_DEFAULT_PLOT_SIZE = 20;
+export const RIVER_WIDTH = 2;
+export const LAKE_SIZE = 6;
+export const PLAYER_COLORS = ['#22d3ee', '#f472b6', '#a3e635', '#fb923c', '#a78bfa', '#facc15'];
+export const DEMOLISH_COST = 5;
+export const PROPOSAL_TTL_MS = 60_000; // Unanswered proposals expire after a minute
+export const COMMUTE_TAX = 0.1; // Share of a commuter's output paid to their home city
+
 export const BUILDINGS: Record<BuildingType, BuildingConfig> = {
   [BuildingType.None]: {
     type: BuildingType.None,
@@ -91,6 +102,26 @@ export const BUILDINGS: Record<BuildingType, BuildingConfig> = {
     description: 'Attracts residents (+1 move-in/day) · cleans factory pollution for houses next to it',
     color: '#4ade80', // green-400
     popGen: 1,
+    incomeGen: 0,
+    jobs: 0,
+  },
+  [BuildingType.Water]: {
+    type: BuildingType.Water,
+    cost: 0,
+    name: 'Water',
+    description: 'River and lake between co-op cities',
+    color: '#3b82f6',
+    popGen: 0,
+    incomeGen: 0,
+    jobs: 0,
+  },
+  [BuildingType.Bridge]: {
+    type: BuildingType.Bridge,
+    cost: 75, // Each of the two cities pays this share
+    name: 'Bridge',
+    description: "Click the river next to a friend's city to propose a bridge. If they accept, you each pay $75. Connect both ends to roads so commuters can cross.",
+    color: '#94a3b8',
+    popGen: 0,
     incomeGen: 0,
     jobs: 0,
   },
