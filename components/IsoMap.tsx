@@ -4,11 +4,17 @@
 */
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { Canvas, useFrame, useThree, ThreeElements } from '@react-three/fiber';
-import { MapControls, Environment, SoftShadows, Instance, Instances, Float, useTexture, Outlines, OrthographicCamera, PerspectiveCamera } from '@react-three/drei';
+import { MapControls, Environment, SoftShadows, Instance, Instances, Float, useTexture, Outlines, OrthographicCamera, PerspectiveCamera, Billboard } from '@react-three/drei';
 import * as THREE from 'three';
 import { MathUtils } from 'three';
 import { Grid, BuildingType, TileData } from '../types';
 import { BUILDINGS } from '../constants';
+import { tileHash, getHouseStyle } from '../services/houses';
+import {
+  isRoadType, isRoadAt, roadConnections, hasSignals, signalLamp, LAMP_RED, LAMP_GREEN, SIDES, SIDE_DIRS, Side,
+  daylight, sunHeight, timeOfDay, buildPedestrianGraph, PedEdge,
+} from '../services/roads';
+import { needsRoad, hasRoadAccess, isPolluted } from '../services/city';
 import {
   TopViewIcon, PerspectiveIcon, RotateLeftIcon, RotateRightIcon, WalkIcon, CloseIcon,
   ChevronUpIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon,
@@ -28,8 +34,8 @@ const gridToWorld = (x: number, y: number, size: number) => {
   return [x - offset, 0, y - offset] as [number, number, number];
 };
 
-// Deterministic random based on coordinates
-const getHash = (x: number, y: number) => Math.abs(Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1;
+// Deterministic random based on coordinates (shared with the game loop, which reads house capacity from it)
+const getHash = tileHash;
 const getRandomRange = (min: number, max: number) => Math.random() * (max - min) + min;
 
 // Shared Geometries
@@ -38,13 +44,21 @@ const cylinderGeo = new THREE.CylinderGeometry(1, 1, 1, 8);
 const coneGeo = new THREE.ConeGeometry(1, 1, 4);
 const sphereGeo = new THREE.SphereGeometry(1, 8, 8);
 
+// Shared materials whose glow follows the day/night cycle (animated in DayNightCycle)
+const WINDOW_DAY = new THREE.Color('#bfdbfe');
+const WINDOW_NIGHT = new THREE.Color('#fcd34d');
+const HEADLIGHT_DAY = new THREE.Color('#9ca3af');
+const HEADLIGHT_NIGHT = new THREE.Color('#fffbeb').multiplyScalar(2);
+const windowMat = new THREE.MeshStandardMaterial({ color: '#bfdbfe', emissive: WINDOW_DAY, emissiveIntensity: 0.2, roughness: 0.1, metalness: 0.8 });
+const streetLampMat = new THREE.MeshStandardMaterial({ color: '#fef3c7', emissive: '#fde68a', emissiveIntensity: 0.3, toneMapped: false });
+const lampPoolMat = new THREE.MeshBasicMaterial({ color: '#fde68a', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
+const headlightMat = new THREE.MeshBasicMaterial({ color: HEADLIGHT_DAY.clone(), toneMapped: false });
+
 // --- 1. Advanced Procedural Buildings ---
 
 // FIX: Wrap component in React.memo to ensure TypeScript recognizes it as a component that accepts a 'key' prop.
 const WindowBlock = React.memo(({ position, scale }: { position: [number, number, number], scale: [number, number, number] }) => (
-  <mesh geometry={boxGeo} position={position} scale={scale}>
-    <meshStandardMaterial color="#bfdbfe" emissive="#bfdbfe" emissiveIntensity={0.2} roughness={0.1} metalness={0.8} />
-  </mesh>
+  <mesh geometry={boxGeo} material={windowMat} position={position} scale={scale} />
 ));
 
 const SmokeStack = ({ position }: { position: [number, number, number] }) => {
@@ -121,8 +135,10 @@ const ProceduralBuilding = React.memo(({ type, baseColor, x, y, opacity = 1, tra
     <group rotation={[0, rotation, 0]} position={[0, yOffset, 0]}>
       {(() => {
         switch (type) {
-          case BuildingType.Residential:
-            if (variant < 33) {
+          case BuildingType.Residential: {
+            // Style also sets capacity: Cottage 5, Boxy 8, Townhouse 10 (services/houses.ts)
+            const style = getHouseStyle(x, y).name;
+            if (style === 'Cozy Cottage') {
               // Cozy Cottage
               return (
                 <>
@@ -133,7 +149,7 @@ const ProceduralBuilding = React.memo(({ type, baseColor, x, y, opacity = 1, tra
                   <mesh {...commonProps} material={accentMat} geometry={boxGeo} position={[0, 0.1, 0.32]} scale={[0.15, 0.2, 0.05]} />
                 </>
               );
-            } else if (variant < 66) {
+            } else if (style === 'Modern Boxy') {
               // Modern Boxy
               return (
                 <>
@@ -153,6 +169,7 @@ const ProceduralBuilding = React.memo(({ type, baseColor, x, y, opacity = 1, tra
                 </>
               );
             }
+          }
 
           case BuildingType.Commercial:
             if (variant < 40) {
@@ -255,245 +272,417 @@ const ProceduralBuilding = React.memo(({ type, baseColor, x, y, opacity = 1, tra
 
 // --- 2. Dynamic Systems (Traffic, Citizens, Environment) ---
 
-const carColors = ['#ef4444', '#3b82f6', '#eab308', '#ffffff', '#1f2937', '#f97316'];
+const ROAD_TOP_Y = -0.289; // Top of a road GroundTile (see GroundTile/RoadDetails)
 
-const TrafficSystem = ({ grid }: { grid: Grid }) => {
+const carColors = ['#ef4444', '#3b82f6', '#eab308', '#ffffff', '#1f2937', '#f97316'];
+const MAX_CARS = 60;
+const CAR_STOP_AT = 0.48; // Progress towards the next tile where a car waits at a red light (just before the tile edge)
+const CAR_GAP = 0.6; // Minimum progress between queued cars (car length is 0.5)
+const CAR_LEN = 0.5;
+const CAR_H = 0.15;
+const CAR_W = 0.3;
+const LANE_OFFSET = 0.15; // Cars keep to the right of the centre line
+const ROUNDABOUT_RADIUS = 0.3; // Cars circle the island at this radius
+const ROUNDABOUT_ARC = 0.35; // Share of the leaving trip spent circling (the rest drives out to the tile edge)
+const AMBULANCE_MIN_CARS = 6; // With this many cars, one of them is an ambulance
+
+const carCabinMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.2, metalness: 0.6 });
+const taillightMat = new THREE.MeshBasicMaterial({ color: '#ffffff', toneMapped: false });
+const sirenMat = new THREE.MeshBasicMaterial({ color: '#ef4444', toneMapped: false });
+const SIREN_RED = new THREE.Color('#ff2d2d').multiplyScalar(2);
+const SIREN_BLUE = new THREE.Color('#3b82ff').multiplyScalar(2);
+
+interface Car {
+  px: number; py: number; // Previous tile (to know where a car entered a roundabout)
+  cx: number; cy: number; // Tile the car is leaving
+  tx: number; ty: number; // Tile the car is driving to
+  progress: number; // 0..1 from the current tile centre to the target tile centre
+  speed: number;
+  angle: number; // Last heading, kept while standing still
+  braking: boolean;
+}
+
+// Point on the right-hand lane of the straight road from tile a to tile b
+const lanePoint = (ax: number, ay: number, bx: number, by: number, p: number): [number, number] => {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1;
+  return [ax + dx * p + (-dy / len) * LANE_OFFSET, ay + dy * p + (dx / len) * LANE_OFFSET];
+};
+
+const lerp2 = (a: [number, number], b: [number, number], k: number): [number, number] =>
+  [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+
+// Where a car is at progress p; around roundabouts it circles the island (counter-clockwise seen from above)
+const carPoint = (car: Car, p: number, roundabouts: Set<string>): [number, number] => {
+  const { px, py, cx, cy, tx, ty } = car;
+  const moving = cx !== tx || cy !== ty;
+
+  if (moving && p > 0.5 && roundabouts.has(`${tx},${ty}`)) {
+    // Entering: from the tile edge to the circle, on the side the car comes from
+    const inAngle = Math.atan2(cy - ty, cx - tx);
+    const entry: [number, number] = [tx + Math.cos(inAngle) * ROUNDABOUT_RADIUS, ty + Math.sin(inAngle) * ROUNDABOUT_RADIUS];
+    return lerp2(lanePoint(cx, cy, tx, ty, 0.5), entry, (p - 0.5) / 0.5);
+  }
+  if (moving && p < 0.5 && roundabouts.has(`${cx},${cy}`)) {
+    // Leaving: circle from the entry side to the exit side, then drive out to the tile edge
+    const outAngle = Math.atan2(ty - cy, tx - cx);
+    const inAngle = px === cx && py === cy ? outAngle - Math.PI : Math.atan2(py - cy, px - cx);
+    let sweep = ((inAngle - outAngle) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    if (sweep < 0.01) sweep = Math.PI * 2; // U-turn: go all the way round
+    if (p < ROUNDABOUT_ARC) {
+      const a = inAngle - sweep * (p / ROUNDABOUT_ARC);
+      return [cx + Math.cos(a) * ROUNDABOUT_RADIUS, cy + Math.sin(a) * ROUNDABOUT_RADIUS];
+    }
+    const exit: [number, number] = [cx + Math.cos(outAngle) * ROUNDABOUT_RADIUS, cy + Math.sin(outAngle) * ROUNDABOUT_RADIUS];
+    return lerp2(exit, lanePoint(cx, cy, tx, ty, 0.5), (p - ROUNDABOUT_ARC) / (0.5 - ROUNDABOUT_ARC));
+  }
+  return lanePoint(cx, cy, tx, ty, p);
+};
+
+const TrafficSystem = ({ grid, carCount }: { grid: Grid; carCount: number }) => {
   const roadTiles = useMemo(() => {
     const roads: {x: number, y: number}[] = [];
     grid.forEach(row => row.forEach(tile => {
-      if (tile.buildingType === BuildingType.Road) roads.push({x: tile.x, y: tile.y});
+      if (isRoadType(tile.buildingType)) roads.push({x: tile.x, y: tile.y});
     }));
     return roads;
   }, [grid]);
 
-  const carCount = Math.min(roadTiles.length, 30);
-  const carsRef = useRef<THREE.InstancedMesh>(null);
-  const carsState = useRef<Float32Array>(new Float32Array(0)); 
+  const roadKeys = useMemo(() => new Set(roadTiles.map(t => `${t.x},${t.y}`)), [roadTiles]);
+  const signalised = useMemo(() => new Set(roadTiles.filter(t => hasSignals(grid, t.x, t.y)).map(t => `${t.x},${t.y}`)), [grid, roadTiles]);
+  const roundabouts = useMemo(() => new Set(roadTiles.filter(t => grid[t.y][t.x].buildingType === BuildingType.Roundabout).map(t => `${t.x},${t.y}`)), [grid, roadTiles]);
+
+  const bodyRef = useRef<THREE.InstancedMesh>(null);
+  const cabinRef = useRef<THREE.InstancedMesh>(null);
+  const headRef = useRef<THREE.InstancedMesh>(null);
+  const tailRef = useRef<THREE.InstancedMesh>(null);
+  const sirenRef = useRef<THREE.Mesh>(null);
+  const cars = useRef<Car[]>([]);
   const dummy = useMemo(() => new THREE.Object3D(), []);
-  const colors = useMemo(() => new Float32Array(0), []);
+  const color = useMemo(() => new THREE.Color(), []);
 
+  const spawnCar = useCallback((): Car => {
+    const t = roadTiles[Math.floor(Math.random() * roadTiles.length)];
+    return { px: t.x, py: t.y, cx: t.x, cy: t.y, tx: t.x, ty: t.y, progress: 1, speed: getRandomRange(0.01, 0.03), angle: 0, braking: false };
+  }, [roadTiles]);
+
+  const ambulanceShown = useRef(false);
+  const paintCar = useCallback((i: number) => {
+    if (!bodyRef.current) return;
+    color.set(i === 0 && ambulanceShown.current ? '#f8fafc' : carColors[Math.floor(Math.random() * carColors.length)]);
+    bodyRef.current.setColorAt(i, color);
+    if (bodyRef.current.instanceColor) bodyRef.current.instanceColor.needsUpdate = true;
+  }, [color]);
+
+  // Keep cars that are still on a road when the map changes; respawn the rest
   useEffect(() => {
-    if (roadTiles.length < 2) return;
-    carsState.current = new Float32Array(carCount * 6);
-    const newColors = new Float32Array(carCount * 3);
+    cars.current = cars.current.map((car, i) => {
+      if (roadKeys.has(`${car.cx},${car.cy}`) && roadKeys.has(`${car.tx},${car.ty}`)) return car;
+      if (roadTiles.length === 0) return car;
+      paintCar(i);
+      return spawnCar();
+    });
+  }, [roadKeys, roadTiles, spawnCar, paintCar]);
 
-    for (let i = 0; i < carCount; i++) {
-      const startNode = roadTiles[Math.floor(Math.random() * roadTiles.length)];
-      carsState.current[i*6 + 0] = startNode.x;
-      carsState.current[i*6 + 1] = startNode.y;
-      carsState.current[i*6 + 2] = startNode.x;
-      carsState.current[i*6 + 3] = startNode.y;
-      carsState.current[i*6 + 4] = 1; // force pick new target
-      carsState.current[i*6 + 5] = getRandomRange(0.01, 0.03); // speed
+  useFrame(({ clock }) => {
+    const body = bodyRef.current;
+    if (!body || !cabinRef.current || !headRef.current || !tailRef.current || roadTiles.length < 2) return;
+    const t = clock.elapsedTime;
+    const night = 1 - daylight(t);
 
-      const color = new THREE.Color(carColors[Math.floor(Math.random() * carColors.length)]);
-      newColors[i*3] = color.r; newColors[i*3+1] = color.g; newColors[i*3+2] = color.b;
+    // Grow or shrink the fleet with the number of commuters
+    const n = Math.min(carCount, MAX_CARS);
+    while (cars.current.length < n) {
+      paintCar(cars.current.length);
+      cars.current.push(spawnCar());
     }
-
-    if (carsRef.current) {
-        carsRef.current.instanceColor = new THREE.InstancedBufferAttribute(newColors, 3);
+    cars.current.length = n;
+    const hasAmbulance = n >= AMBULANCE_MIN_CARS;
+    if (hasAmbulance !== ambulanceShown.current) {
+      ambulanceShown.current = hasAmbulance; // Car 0 becomes (or stops being) the white ambulance
+      if (n > 0) paintCar(0);
     }
-  }, [roadTiles, carCount]);
+    const list = cars.current;
 
-  useFrame(() => {
-    if (!carsRef.current || roadTiles.length < 2 || carsState.current.length === 0) return;
+    for (let i = 0; i < n; i++) {
+      const car = list[i];
+      const ambulance = hasAmbulance && i === 0;
+      const speed = ambulance ? 0.035 : car.speed;
+      let next = car.progress + speed;
 
-    for (let i = 0; i < carCount; i++) {
-      const idx = i * 6;
-      let curX = carsState.current[idx];
-      let curY = carsState.current[idx+1];
-      let tarX = carsState.current[idx+2];
-      let tarY = carsState.current[idx+3];
-      let progress = carsState.current[idx+4];
-      const speed = carsState.current[idx+5];
+      // Stop at the junction's edge (before its zebra crossing) unless the light for this arm is green.
+      // The ambulance runs red lights.
+      const towardsTile = car.tx !== car.cx || car.ty !== car.cy;
+      if (!ambulance && towardsTile && signalised.has(`${car.tx},${car.ty}`) && car.progress <= CAR_STOP_AT && next > CAR_STOP_AT) {
+        if (signalLamp(t, car.tx, car.ty, car.tx === car.cx) !== LAMP_GREEN) next = CAR_STOP_AT;
+      }
 
-      progress += speed;
+      // Queue behind the car ahead on the same stretch of road
+      for (let j = 0; j < n; j++) {
+        const o = list[j];
+        if (j === i || o.cx !== car.cx || o.cy !== car.cy || o.tx !== car.tx || o.ty !== car.ty) continue;
+        if (o.progress > car.progress || (o.progress === car.progress && j < i)) next = Math.min(next, Math.max(car.progress, o.progress - CAR_GAP));
+      }
 
-      if (progress >= 1) {
-        curX = tarX;
-        curY = tarY;
-        progress = 0;
-        
-        const neighbors = roadTiles.filter(t => 
-          (Math.abs(t.x - curX) === 1 && t.y === curY) || 
-          (Math.abs(t.y - curY) === 1 && t.x === curX)
-        );
+      car.braking = next < car.progress + speed * 0.5;
+      car.progress = next;
 
+      if (car.progress >= 1) {
+        car.px = car.cx; car.py = car.cy;
+        car.cx = car.tx; car.cy = car.ty;
+        car.progress = 0;
+
+        const neighbors = roadTiles.filter(r =>
+          (Math.abs(r.x - car.cx) === 1 && r.y === car.cy) || (Math.abs(r.y - car.cy) === 1 && r.x === car.cx));
         if (neighbors.length > 0) {
-            // Simple pathfinding: avoid going back immediately
-            const valid = neighbors.length > 1 
-                ? neighbors.filter(n => Math.abs(n.x - carsState.current[idx]) > 0.1 || Math.abs(n.y - carsState.current[idx+1]) > 0.1)
-                : neighbors;
-            
-            const next = valid.length > 0 
-                ? valid[Math.floor(Math.random() * valid.length)]
-                : neighbors[0];
-            
-            tarX = next.x;
-            tarY = next.y;
+          // Avoid turning straight back unless it's a dead end
+          const valid = neighbors.length > 1 ? neighbors.filter(r => r.x !== car.px || r.y !== car.py) : neighbors;
+          const pick = valid[Math.floor(Math.random() * valid.length)];
+          car.tx = pick.x; car.ty = pick.y;
         } else {
-            const rnd = roadTiles[Math.floor(Math.random() * roadTiles.length)];
-            curX = rnd.x; curY = rnd.y; tarX = rnd.x; tarY = rnd.y;
+          Object.assign(car, spawnCar());
         }
       }
 
-      carsState.current[idx] = curX;
-      carsState.current[idx+1] = curY;
-      carsState.current[idx+2] = tarX;
-      carsState.current[idx+3] = tarY;
-      carsState.current[idx+4] = progress;
+      // Position and heading along the path
+      const [gx, gy] = carPoint(car, car.progress, roundabouts);
+      const [ax, ay] = car.progress > 0.98 ? carPoint(car, car.progress - 0.02, roundabouts) : [gx, gy];
+      const [bx, by] = car.progress > 0.98 ? [gx, gy] : carPoint(car, car.progress + 0.02, roundabouts);
+      if (Math.hypot(bx - ax, by - ay) > 1e-4) car.angle = Math.atan2(by - ay, bx - ax);
+      const a = car.angle;
+      const fx = Math.cos(a), fz = Math.sin(a); // Forward, in world x/z
+      const sx = -Math.sin(a), sz = Math.cos(a); // Right-hand side
 
-      // Interpolate position
-      const gx = MathUtils.lerp(curX, tarX, progress);
-      const gy = MathUtils.lerp(curY, tarY, progress);
+      const [wx, , wz] = gridToWorld(gx, gy, grid.length);
+      const y = ROAD_TOP_Y + CAR_H / 2;
 
-      // Determine driving side offset
-      const dx = tarX - curX;
-      const dy = tarY - curY;
-      const angle = Math.atan2(dy, dx);
-      
-      // Offset to right side relative to movement
-      const offsetAmt = 0.15;
-      // Normals: (-dy, dx)
-      const len = Math.sqrt(dx*dx + dy*dy) || 1;
-      const offX = (-dy/len) * offsetAmt;
-      const offY = (dx/len) * offsetAmt;
-
-      const [wx, _, wz] = gridToWorld(gx + offX, gy + offY, grid.length);
-
-      // Road surface is approx -0.3. Car height 0.15.
-      dummy.position.set(wx, -0.3 + 0.075, wz);
-      dummy.rotation.set(0, -angle, 0);
-      // Car dimensions (Length(X), Height(Y), Width(Z) assuming 0 rotation aligns with X)
-      dummy.scale.set(0.5, 0.15, 0.3); 
-      
+      dummy.rotation.set(0, -a, 0);
+      dummy.position.set(wx, y, wz);
+      dummy.scale.set(CAR_LEN, CAR_H, CAR_W);
       dummy.updateMatrix();
-      carsRef.current.setMatrixAt(i, dummy.matrix);
+      body.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(wx - fx * 0.04, y + CAR_H * 0.75, wz - fz * 0.04);
+      dummy.scale.set(0.26, 0.09, 0.24);
+      dummy.updateMatrix();
+      cabinRef.current.setMatrixAt(i, dummy.matrix);
+
+      // Head- and taillights (taillights glow bright red when braking)
+      dummy.scale.set(0.012, 0.035, 0.06);
+      if (car.braking) color.setRGB(1.6, 0.1, 0.1); else color.setRGB(0.3 + 0.35 * night, 0.02, 0.02);
+      for (let s = 0; s < 2; s++) {
+        const side = s === 0 ? -0.09 : 0.09;
+        dummy.position.set(wx + fx * (CAR_LEN / 2 + 0.004) + sx * side, y, wz + fz * (CAR_LEN / 2 + 0.004) + sz * side);
+        dummy.updateMatrix();
+        headRef.current.setMatrixAt(i * 2 + s, dummy.matrix);
+        dummy.position.set(wx - fx * (CAR_LEN / 2 + 0.004) + sx * side, y, wz - fz * (CAR_LEN / 2 + 0.004) + sz * side);
+        dummy.updateMatrix();
+        tailRef.current.setMatrixAt(i * 2 + s, dummy.matrix);
+        tailRef.current.setColorAt(i * 2 + s, color);
+      }
+
+      if (ambulance && sirenRef.current) {
+        sirenRef.current.position.set(wx, y + CAR_H / 2 + 0.03, wz);
+        sirenRef.current.rotation.set(0, -a, 0);
+        sirenMat.color.copy(Math.floor(t * 6) % 2 ? SIREN_RED : SIREN_BLUE);
+      }
     }
-    carsRef.current.instanceMatrix.needsUpdate = true;
+
+    if (sirenRef.current) sirenRef.current.visible = hasAmbulance;
+    body.count = n;
+    cabinRef.current.count = n;
+    headRef.current.count = n * 2;
+    tailRef.current.count = n * 2;
+    for (const m of [body, cabinRef.current, headRef.current, tailRef.current]) m.instanceMatrix.needsUpdate = true;
+    if (tailRef.current.instanceColor) tailRef.current.instanceColor.needsUpdate = true;
   });
 
   if (roadTiles.length < 2) return null;
 
   return (
-    <instancedMesh ref={carsRef} args={[boxGeo, undefined, carCount]} castShadow>
-      <meshStandardMaterial roughness={0.5} metalness={0.3} />
-    </instancedMesh>
+    <group raycast={noRaycast}>
+      <instancedMesh ref={bodyRef} args={[boxGeo, undefined, MAX_CARS]} castShadow raycast={noRaycast}>
+        <meshStandardMaterial roughness={0.5} metalness={0.3} />
+      </instancedMesh>
+      <instancedMesh ref={cabinRef} args={[boxGeo, carCabinMat, MAX_CARS]} castShadow raycast={noRaycast} />
+      <instancedMesh ref={headRef} args={[boxGeo, headlightMat, MAX_CARS * 2]} raycast={noRaycast} />
+      <instancedMesh ref={tailRef} args={[boxGeo, taillightMat, MAX_CARS * 2]} raycast={noRaycast} />
+      <mesh ref={sirenRef} geometry={boxGeo} material={sirenMat} scale={[0.08, 0.04, 0.2]} visible={false} raycast={noRaycast} />
+    </group>
   );
 };
 
 const clothesColors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#ffffff'];
+const MAX_PEOPLE = 300;
+const PERSON_H = 0.2;
+const PERSON_W = 0.08;
 
+interface Walker {
+  from: number; // Graph node the walker is leaving
+  prev: number; // Node before that (to avoid turning straight back)
+  edge: PedEdge | null; // Edge being walked (or waited at, for a crossing on red)
+  progress: number;
+  speed: number; // Tiles per frame
+  jitter: number; // Sideways offset so people don't walk in single file
+  anim: number;
+}
+
+// Citizens walk along the pavements and cross on zebra crossings, waiting for cars to stop at signals
 const PopulationSystem = ({ population, grid }: { population: number, grid: Grid }) => {
-    const agentCount = Math.min(Math.floor(population / 2), 300); 
-    const meshRef = useRef<THREE.InstancedMesh>(null);
-    
-    // Find tiles where people can walk (Roads, Parks, empty ground)
-    const walkableTiles = useMemo(() => {
-        const tiles: {x: number, y: number}[] = [];
-        grid.forEach(row => row.forEach(tile => {
-          if (tile.buildingType === BuildingType.Road || tile.buildingType === BuildingType.Park || tile.buildingType === BuildingType.None) {
-            tiles.push({x: tile.x, y: tile.y});
-          }
-        }));
-        return tiles;
-    }, [grid]);
-    
-    const agentsState = useRef<Float32Array>(new Float32Array(0));
-    const dummy = useMemo(() => new THREE.Object3D(), []);
-    
-    useEffect(() => {
-        if (agentCount === 0 || walkableTiles.length === 0) return;
-        agentsState.current = new Float32Array(agentCount * 6);
-        const newColors = new Float32Array(agentCount * 3);
+  const graph = useMemo(() => buildPedestrianGraph(grid), [grid]);
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const walkers = useRef<Walker[]>([]);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
 
-        for(let i=0; i<agentCount; i++) {
-            const t = walkableTiles[Math.floor(Math.random() * walkableTiles.length)];
-            // Spawn with random offset in tile
-            const x = t.x + getRandomRange(-0.4, 0.4);
-            const y = t.y + getRandomRange(-0.4, 0.4);
+  // Paths change with the map: start everyone afresh
+  useEffect(() => { walkers.current = []; }, [graph]);
 
-            agentsState.current[i*6+0] = x;
-            agentsState.current[i*6+1] = y;
-            
-            // Initial target
-            const tt = walkableTiles[Math.floor(Math.random() * walkableTiles.length)];
-            agentsState.current[i*6+2] = tt.x + getRandomRange(-0.4, 0.4);
-            agentsState.current[i*6+3] = tt.y + getRandomRange(-0.4, 0.4);
-            
-            agentsState.current[i*6+4] = getRandomRange(0.005, 0.015); // speed
-            agentsState.current[i*6+5] = Math.random() * Math.PI * 2; // anim
+  useEffect(() => {
+    if (!meshRef.current) return;
+    const c = new THREE.Color();
+    for (let i = 0; i < MAX_PEOPLE; i++) {
+      c.set(clothesColors[Math.floor(Math.random() * clothesColors.length)]);
+      meshRef.current.setColorAt(i, c);
+    }
+    if (meshRef.current.instanceColor) meshRef.current.instanceColor.needsUpdate = true;
+  }, []);
 
-            const c = new THREE.Color(clothesColors[Math.floor(Math.random() * clothesColors.length)]);
-            newColors[i*3] = c.r; newColors[i*3+1] = c.g; newColors[i*3+2] = c.b;
+  useFrame(({ clock }) => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const t = clock.elapsedTime;
+    const n = graph.nodes.length > 0 ? Math.min(Math.floor(population / 2), MAX_PEOPLE) : 0;
+
+    while (walkers.current.length < n) {
+      const start = Math.floor(Math.random() * graph.nodes.length);
+      walkers.current.push({
+        from: start, prev: -1, edge: null, progress: 0,
+        speed: getRandomRange(0.004, 0.009), jitter: getRandomRange(-0.035, 0.035), anim: Math.random() * Math.PI * 2,
+      });
+    }
+    walkers.current.length = n;
+
+    for (let i = 0; i < n; i++) {
+      const w = walkers.current[i];
+      const options = graph.edges[w.from];
+
+      if (!w.edge && options.length > 0) {
+        const onward = options.length > 1 ? options.filter(e => e.to !== w.prev) : options;
+        w.edge = onward[Math.floor(Math.random() * onward.length)];
+        w.progress = 0;
+      }
+
+      const a = graph.nodes[w.from];
+      const b = w.edge ? graph.nodes[w.edge.to] : a;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+
+      // At a signalised crossing, step off the kerb only while cars on that arm have red
+      const crossing = w.edge?.crossing;
+      const waiting = !!crossing?.signal && w.progress === 0 && signalLamp(t, crossing.x, crossing.y, crossing.northSouth) !== LAMP_RED;
+
+      if (w.edge && !waiting) {
+        w.progress += w.speed / len;
+        if (w.progress >= 1) {
+          w.prev = w.from;
+          w.from = w.edge.to;
+          w.edge = null;
+          w.progress = 0;
         }
+      }
 
-        if (meshRef.current) {
-            meshRef.current.instanceColor = new THREE.InstancedBufferAttribute(newColors, 3);
-        }
-    }, [agentCount, walkableTiles]);
+      const k = Math.min(w.progress, 1);
+      const gx = a.x + dx * k + (-dy / len) * w.jitter;
+      const gy = a.y + dy * k + (dx / len) * w.jitter;
+      const [wx, , wz] = gridToWorld(gx, gy, grid.length);
+      const ground = crossing && w.progress > 0 ? ROAD_TOP_Y : ROAD_TOP_Y + PAVEMENT_H;
+      const bounce = waiting || !w.edge ? 0 : Math.abs(Math.sin(t * 10 + w.anim)) * 0.03;
 
-    useFrame((state) => {
-        if (!meshRef.current || agentCount === 0 || agentsState.current.length === 0) return;
-        const time = state.clock.elapsedTime;
+      dummy.position.set(wx, ground + PERSON_H / 2 + bounce, wz);
+      dummy.rotation.set(0, -Math.atan2(dy, dx), 0);
+      dummy.scale.set(PERSON_W, PERSON_H, PERSON_W);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.count = n;
+    mesh.instanceMatrix.needsUpdate = true;
+  });
 
-        for(let i=0; i<agentCount; i++) {
-            const idx = i*6;
-            let x = agentsState.current[idx];
-            let y = agentsState.current[idx+1];
-            let tx = agentsState.current[idx+2];
-            let ty = agentsState.current[idx+3];
-            const speed = agentsState.current[idx+4];
-            const animOffset = agentsState.current[idx+5];
+  return (
+    <instancedMesh ref={meshRef} args={[boxGeo, undefined, MAX_PEOPLE]} castShadow raycast={noRaycast}>
+      <meshStandardMaterial roughness={0.8} />
+    </instancedMesh>
+  );
+};
 
-            const dx = tx - x;
-            const dy = ty - y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
+// Sky, sun/moon and ambient light follow a day/night cycle; windows, street lamps and headlights glow at night
+const SKY_DAY = new THREE.Color('#0c4a6e');
+const SKY_DUSK = new THREE.Color('#9a3412');
+const SKY_NIGHT = new THREE.Color('#020617');
+const SUN_DAY = new THREE.Color('#fffbeb');
+const SUN_LOW = new THREE.Color('#fb923c');
+const MOONLIGHT = new THREE.Color('#93c5fd');
+const AMBIENT_DAY = new THREE.Color('#cceeff');
+const AMBIENT_NIGHT = new THREE.Color('#1e3a8a');
 
-            if (dist < 0.1) {
-                // Pick new random target from walkable
-                if (walkableTiles.length > 0) {
-                    const tt = walkableTiles[Math.floor(Math.random() * walkableTiles.length)];
-                    tx = tt.x + getRandomRange(-0.4, 0.4);
-                    ty = tt.y + getRandomRange(-0.4, 0.4);
-                    agentsState.current[idx+2] = tx;
-                    agentsState.current[idx+3] = ty;
-                }
-            } else {
-                x += (dx/dist) * speed;
-                y += (dy/dist) * speed;
-                agentsState.current[idx] = x;
-                agentsState.current[idx+1] = y;
-            }
+const DayNightCycle = ({ shadowExtent }: { shadowExtent: number }) => {
+  const sun = useRef<THREE.DirectionalLight>(null);
+  const ambient = useRef<THREE.AmbientLight>(null);
+  const scene = useThree(state => state.scene);
+  const sky = useMemo(() => new THREE.Color(SKY_DAY), []);
 
-            const [wx, _, wz] = gridToWorld(x, y, grid.length);
+  useEffect(() => {
+    scene.background = sky;
+    return () => { scene.background = null; };
+  }, [scene, sky]);
 
-            // Walking bounce
-            const bounce = Math.abs(Math.sin(time * 10 + animOffset)) * 0.03;
+  useFrame(({ clock }) => {
+    const t = clock.elapsedTime;
+    const day = daylight(t);
+    const night = 1 - day;
+    const height = sunHeight(t);
+    const dusk = Math.max(0, 1 - Math.abs(height) / 0.3); // 1 with the sun on the horizon
 
-            // Person dimensions
-            const height = 0.2;
-            const width = 0.08;
-            // Ground level approx -0.3 to -0.4
-            const groundY = -0.35; 
+    sky.copy(SKY_NIGHT).lerp(SKY_DAY, day).lerp(SKY_DUSK, dusk * 0.45);
+    scene.environmentIntensity = 0.2 + 0.8 * day;
 
-            dummy.position.set(wx, groundY + height/2 + bounce, wz);
-            dummy.rotation.set(0, -Math.atan2(dy, dx), 0);
-            dummy.scale.set(width, height, width);
-            
-            dummy.updateMatrix();
-            meshRef.current.setMatrixAt(i, dummy.matrix);
-        }
-        meshRef.current.instanceMatrix.needsUpdate = true;
-    });
+    if (ambient.current) {
+      ambient.current.intensity = 0.2 + 0.3 * day;
+      ambient.current.color.copy(AMBIENT_NIGHT).lerp(AMBIENT_DAY, day);
+    }
+    if (sun.current) {
+      // The sun arcs across the sky by day; the moon lights the city from the opposite side at night
+      const angle = 2 * Math.PI * (timeOfDay(t) - 0.25);
+      const dir = height >= 0 ? 1 : -1;
+      sun.current.position.set(Math.cos(angle) * 20 * dir, Math.max(4, Math.abs(Math.sin(angle)) * 25), 10);
+      sun.current.intensity = height >= 0 ? 0.4 + 1.6 * day : 0.35;
+      sun.current.color.copy(MOONLIGHT).lerp(SUN_LOW, day).lerp(SUN_DAY, day * (1 - dusk));
+    }
 
-    if (agentCount === 0) return null;
+    windowMat.emissive.copy(WINDOW_DAY).lerp(WINDOW_NIGHT, night);
+    windowMat.emissiveIntensity = 0.2 + 1.3 * night;
+    streetLampMat.emissiveIntensity = 0.3 + 3 * night;
+    lampPoolMat.opacity = 0.3 * night;
+    headlightMat.color.copy(HEADLIGHT_DAY).lerp(HEADLIGHT_NIGHT, night);
+  });
 
-    return (
-        <instancedMesh ref={meshRef} args={[boxGeo, undefined, agentCount]} castShadow>
-            <meshStandardMaterial roughness={0.8} />
-        </instancedMesh>
-    )
+  return (
+    <>
+      <ambientLight ref={ambient} intensity={0.5} color="#cceeff" />
+      <directionalLight
+        ref={sun}
+        castShadow
+        position={[15, 20, 10]}
+        intensity={2}
+        color="#fffbeb"
+        shadow-mapSize={[2048, 2048]}
+        shadow-camera-left={-shadowExtent} shadow-camera-right={shadowExtent}
+        shadow-camera-top={shadowExtent} shadow-camera-bottom={-shadowExtent}
+      />
+    </>
+  );
 };
 
 // Clouds & Birds
@@ -569,40 +758,289 @@ const EnvironmentEffects = ({ size }: { size: number }) => {
 
 // --- 3. Main Map Component ---
 
-const RoadMarkings = React.memo(({ x, y, grid, yOffset }: { x: number; y: number; grid: Grid; yOffset: number }) => {
-  const lineMaterial = useMemo(() => new THREE.MeshStandardMaterial({ color: '#fbbf24' }), []);
-  const lineGeo = useMemo(() => new THREE.PlaneGeometry(0.1, 0.5), []);
+// Road details: pavements with white curbs on unconnected sides, centre lines, street lamps and furniture,
+// zebra crossings + traffic signals at junctions (3+ connected roads), and roundabout islands
+const PAVEMENT_W = 0.15; // Pavement width; the carriageway between pavements is 1 - 2 * PAVEMENT_W
+const PAVEMENT_H = 0.04;
+const CURB_W = 0.03;
+const noRaycast = () => null; // Decorations let clicks/hover fall through to the tile
 
-  const hasUp = y > 0 && grid[y - 1][x].buildingType === BuildingType.Road;
-  const hasDown = y < grid.length - 1 && grid[y + 1][x].buildingType === BuildingType.Road;
-  const hasLeft = x > 0 && grid[y][x - 1].buildingType === BuildingType.Road;
-  const hasRight = x < grid.length - 1 && grid[y][x + 1].buildingType === BuildingType.Road;
+const roundGeo = new THREE.CylinderGeometry(1, 1, 1, 24);
+const lineMat = new THREE.MeshStandardMaterial({ color: '#fbbf24' });
+const pavementMat = new THREE.MeshStandardMaterial({ color: '#cbd5e1', roughness: 0.95, flatShading: true });
+const curbMat = new THREE.MeshStandardMaterial({ color: '#f8fafc', roughness: 0.6 });
+const zebraMat = new THREE.MeshStandardMaterial({ color: '#f8fafc', roughness: 0.7 });
+const signalPoleMat = new THREE.MeshStandardMaterial({ color: '#374151', metalness: 0.6, roughness: 0.4 });
+const signalHeadMat = new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.5 });
+const LAMP_COLORS = ['#ef4444', '#f59e0b', '#22c55e'] as const; // red, amber, green (same order as LAMP_RED..LAMP_GREEN)
+const lampOnMats = LAMP_COLORS.map(c => new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 2.5, toneMapped: false }));
+const lampOffMats = LAMP_COLORS.map(c => new THREE.MeshStandardMaterial({ color: new THREE.Color(c).multiplyScalar(0.18), roughness: 0.4 }));
+const lampPostMat = new THREE.MeshStandardMaterial({ color: '#475569', metalness: 0.5, roughness: 0.5 });
+const trunkMat = new THREE.MeshStandardMaterial({ color: '#78350f' });
+const leafMat = new THREE.MeshStandardMaterial({ color: '#15803d', flatShading: true });
+const benchMat = new THREE.MeshStandardMaterial({ color: '#a16207', roughness: 0.9 });
+const shelterGlassMat = new THREE.MeshStandardMaterial({ color: '#bae6fd', transparent: true, opacity: 0.45, roughness: 0.1 });
+const busSignMat = new THREE.MeshStandardMaterial({ color: '#2563eb' });
+const islandGrassMat = new THREE.MeshStandardMaterial({ color: '#4ade80', flatShading: true });
 
-  const connections = [hasUp, hasDown, hasLeft, hasRight].filter(Boolean).length;
-  
-  // Isolated road piece: draw a default line
-  if (connections === 0) {
-    return (
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, yOffset, 0]} geometry={lineGeo} material={lineMaterial} />
-    );
-  }
+const TrafficSignal = ({ dir, x, y }: { dir: [number, number]; x: number; y: number }) => {
+  const lampRefs = useRef<(THREE.Mesh | null)[]>([]);
+  const lit = useRef(-1);
+  const northSouth = dir[0] === 0;
+  // Stand on the pavement corner to the right of this arm, facing traffic coming in along it
+  const corner = 0.5 - PAVEMENT_W / 2;
+  const px = (dir[0] - dir[1]) * corner;
+  const pz = (dir[1] + dir[0]) * corner;
+  const yaw = Math.atan2(dir[0], dir[1]);
+
+  useFrame(({ clock }) => {
+    const on = signalLamp(clock.elapsedTime, x, y, northSouth);
+    if (on === lit.current) return;
+    lit.current = on;
+    lampRefs.current.forEach((lamp, i) => { if (lamp) lamp.material = i === on ? lampOnMats[i] : lampOffMats[i]; });
+  });
 
   return (
-    <group rotation={[-Math.PI / 2, 0, 0]} position={[0, yOffset, 0]}>
-      {/* Center point for junctions to fill the gap, lifted slightly to avoid z-fighting */}
-      {(hasUp || hasDown) && (hasLeft || hasRight) && (
-        <mesh position={[0, 0, 0.005]} material={lineMaterial}>
-           <planeGeometry args={[0.12, 0.12]} />
-        </mesh>
-      )}
+    <group position={[px, PAVEMENT_H, pz]} rotation={[0, yaw, 0]}>
+      <mesh geometry={cylinderGeo} material={signalPoleMat} position={[0, 0.3, 0]} scale={[0.018, 0.6, 0.018]} castShadow raycast={noRaycast} />
+      <mesh geometry={boxGeo} material={signalHeadMat} position={[0, 0.66, 0.02]} scale={[0.08, 0.22, 0.06]} castShadow raycast={noRaycast} />
+      {LAMP_COLORS.map((_, i) => (
+        <mesh
+          key={i}
+          ref={el => { lampRefs.current[i] = el; }}
+          geometry={boxGeo}
+          material={lampOffMats[i]}
+          position={[0, 0.73 - i * 0.065, 0.052]} // Red on top, green at the bottom
+          scale={[0.045, 0.045, 0.01]}
+          raycast={noRaycast}
+        />
+      ))}
+    </group>
+  );
+};
 
-      {hasUp && <mesh position={[0, 0.25, 0]} geometry={lineGeo} material={lineMaterial} />}
-      {hasDown && <mesh position={[0, -0.25, 0]} geometry={lineGeo} material={lineMaterial} />}
-      {hasLeft && <mesh position={[-0.25, 0, 0]} rotation={[0, 0, Math.PI / 2]} geometry={lineGeo} material={lineMaterial} />}
-      {hasRight && <mesh position={[0.25, 0, 0]} rotation={[0, 0, Math.PI / 2]} geometry={lineGeo} material={lineMaterial} />}
+// Zebra crossing across one arm of a junction, just inside the tile edge
+const ZebraCrossing = ({ dir }: { dir: [number, number] }) => {
+  const along = 0.34; // Distance of the crossing's centre from the tile centre
+  const depth = 0.18;
+  const carriageway = 1 - 2 * PAVEMENT_W;
+  const stripes = 5;
+  const pitch = carriageway / stripes;
+  const alongX = dir[0] !== 0;
+  return (
+    <>
+      {Array.from({ length: stripes }, (_, i) => {
+        const lateral = -carriageway / 2 + pitch * (i + 0.5);
+        return (
+          <mesh
+            key={i}
+            geometry={boxGeo}
+            material={zebraMat}
+            position={alongX ? [dir[0] * along, 0.003, lateral] : [lateral, 0.003, dir[1] * along]}
+            scale={alongX ? [depth, 0.004, pitch * 0.55] : [pitch * 0.55, 0.004, depth]}
+            receiveShadow
+            raycast={noRaycast}
+          />
+        );
+      })}
+    </>
+  );
+};
+
+// A spot on a pavement strip; `along` runs parallel to the strip, local +z points into the road, y = 0 is the pavement top
+const PavementSpot = ({ side, along, children }: { side: Side; along: number; children: React.ReactNode }) => {
+  const [dx, dz] = SIDE_DIRS[side];
+  const edge = 0.5 - PAVEMENT_W / 2;
+  return (
+    <group position={[dx !== 0 ? dx * edge : along, PAVEMENT_H, dz !== 0 ? dz * edge : along]} rotation={[0, Math.atan2(-dx, -dz), 0]}>
+      {children}
+    </group>
+  );
+};
+
+// Street lamp leaning over the road, with a pool of light on the asphalt at night
+const StreetLamp = () => (
+  <>
+    <mesh geometry={cylinderGeo} material={lampPostMat} position={[0, 0.25, 0]} scale={[0.012, 0.5, 0.012]} castShadow raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={lampPostMat} position={[0, 0.5, 0.06]} scale={[0.015, 0.015, 0.13]} raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={streetLampMat} position={[0, 0.49, 0.12]} scale={[0.05, 0.02, 0.05]} raycast={noRaycast} />
+    <mesh material={lampPoolMat} position={[0, -PAVEMENT_H + 0.005, 0.2]} rotation={[-Math.PI / 2, 0, 0]} raycast={noRaycast}>
+      <circleGeometry args={[0.2, 20]} />
+    </mesh>
+  </>
+);
+
+const StreetTree = ({ scale = 1 }: { scale?: number }) => (
+  <group scale={scale}>
+    <mesh geometry={cylinderGeo} material={trunkMat} position={[0, 0.07, 0]} scale={[0.012, 0.14, 0.012]} castShadow raycast={noRaycast} />
+    <mesh geometry={sphereGeo} material={leafMat} position={[0, 0.19, 0]} scale={0.07} castShadow raycast={noRaycast} />
+  </group>
+);
+
+const Bench = () => (
+  <>
+    <mesh geometry={boxGeo} material={benchMat} position={[0, 0.035, -0.01]} scale={[0.16, 0.012, 0.05]} castShadow raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={benchMat} position={[0, 0.065, -0.035]} scale={[0.16, 0.05, 0.01]} castShadow raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={lampPostMat} position={[-0.065, 0.015, -0.01]} scale={[0.01, 0.03, 0.05]} raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={lampPostMat} position={[0.065, 0.015, -0.01]} scale={[0.01, 0.03, 0.05]} raycast={noRaycast} />
+  </>
+);
+
+const BusStop = () => (
+  <>
+    <mesh geometry={boxGeo} material={lampPostMat} position={[0, 0.2, -0.01]} scale={[0.26, 0.012, 0.09]} castShadow raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={shelterGlassMat} position={[0, 0.1, -0.05]} scale={[0.26, 0.19, 0.006]} raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={lampPostMat} position={[-0.12, 0.1, 0.03]} scale={[0.008, 0.2, 0.008]} raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={lampPostMat} position={[0.12, 0.1, 0.03]} scale={[0.008, 0.2, 0.008]} raycast={noRaycast} />
+    <Bench />
+    <mesh geometry={cylinderGeo} material={lampPostMat} position={[0.17, 0.13, 0.04]} scale={[0.006, 0.26, 0.006]} raycast={noRaycast} />
+    <mesh geometry={boxGeo} material={busSignMat} position={[0.17, 0.25, 0.04]} scale={[0.05, 0.05, 0.008]} raycast={noRaycast} />
+  </>
+);
+
+const RoadDetails = React.memo(({ x, y, grid, yOffset }: { x: number; y: number; grid: Grid; yOffset: number }) => {
+  const connected = roadConnections(grid, x, y);
+  const roundabout = grid[y][x].buildingType === BuildingType.Roundabout;
+  const signals = hasSignals(grid, x, y);
+  const pavementSides = SIDES.filter(s => !connected[s]);
+  const straight = (connected.up && connected.down && !connected.left && !connected.right)
+    || (connected.left && connected.right && !connected.up && !connected.down);
+
+  const edge = 0.5 - PAVEMENT_W / 2;
+  const curbOffset = 0.5 - PAVEMENT_W + CURB_W / 2;
+
+  // Corner pavement where both neighbouring sides are road (the inner corner of a junction or bend),
+  // unless the diagonal tile is road too (an open paved area)
+  const corners: [number, number][] = ([[-1, -1], [1, -1], [-1, 1], [1, 1]] as [number, number][]).filter(([cx, cz]) =>
+    connected[cx < 0 ? 'left' : 'right'] && connected[cz < 0 ? 'up' : 'down'] && !isRoadAt(grid, x + cx, y + cz));
+
+  // Street furniture on quiet road tiles: a lamp on one pavement, and a tree, bench or bus stop on the other
+  const furniture = tileHash(x + 7.3, y + 3.1);
+  const lampSide = pavementSides[0];
+  const extraSide = pavementSides[1] ?? pavementSides[0];
+  const extraAlong = pavementSides[1] ? -0.2 : -0.25;
+
+  return (
+    <group position={[0, yOffset, 0]}>
+      {/* Pavements with a white curb along each side that doesn't continue into another road */}
+      {pavementSides.map(s => {
+        const [dx, dz] = SIDE_DIRS[s];
+        const alongX = dz !== 0; // Up/down pavements run along x
+        // Curb ends meet the perpendicular curb, or run to the tile edge where the road continues
+        const [startOpen, endOpen] = alongX ? [connected.left, connected.right] : [connected.up, connected.down];
+        const curbStart = startOpen ? -0.5 : -0.5 + PAVEMENT_W;
+        const curbEnd = endOpen ? 0.5 : 0.5 - PAVEMENT_W;
+        const curbMid = (curbStart + curbEnd) / 2;
+        const curbLen = curbEnd - curbStart;
+        return (
+          <group key={s}>
+            <mesh
+              geometry={boxGeo} material={pavementMat} receiveShadow castShadow raycast={noRaycast}
+              position={[dx * edge, PAVEMENT_H / 2, dz * edge]}
+              scale={alongX ? [1, PAVEMENT_H, PAVEMENT_W] : [PAVEMENT_W, PAVEMENT_H, 1]}
+            />
+            <mesh
+              geometry={boxGeo} material={curbMat} receiveShadow raycast={noRaycast}
+              position={alongX ? [curbMid, PAVEMENT_H / 2 + 0.003, dz * curbOffset] : [dx * curbOffset, PAVEMENT_H / 2 + 0.003, curbMid]}
+              scale={alongX ? [curbLen, PAVEMENT_H + 0.006, CURB_W] : [CURB_W, PAVEMENT_H + 0.006, curbLen]}
+            />
+          </group>
+        );
+      })}
+      {corners.map(([cx, cz]) => (
+        <mesh
+          key={`${cx},${cz}`}
+          geometry={boxGeo} material={pavementMat} receiveShadow castShadow raycast={noRaycast}
+          position={[cx * edge, PAVEMENT_H / 2, cz * edge]}
+          scale={[PAVEMENT_W, PAVEMENT_H, PAVEMENT_W]}
+        />
+      ))}
+
+      {roundabout ? (
+        // Roundabout: planted island inside a white kerb, zebra crossings on every arm, no signals
+        <>
+          <mesh geometry={roundGeo} material={curbMat} position={[0, 0.02, 0]} scale={[0.19, 0.04, 0.19]} receiveShadow raycast={noRaycast} />
+          <mesh geometry={roundGeo} material={islandGrassMat} position={[0, 0.025, 0]} scale={[0.17, 0.05, 0.17]} receiveShadow raycast={noRaycast} />
+          <group position={[0, 0.05, 0]}><StreetTree scale={1.4} /></group>
+          {SIDES.filter(s => connected[s]).map(s => <group key={s}><ZebraCrossing dir={SIDE_DIRS[s]} /></group>)}
+        </>
+      ) : signals ? (
+        // Junction: zebra crossing and a signal on every connected arm
+        SIDES.filter(s => connected[s]).map(s => (
+          <group key={s}>
+            <ZebraCrossing dir={SIDE_DIRS[s]} />
+            <TrafficSignal dir={SIDE_DIRS[s]} x={x} y={y} />
+          </group>
+        ))
+      ) : (
+        <>
+          {/* Centre line towards each connected neighbour (meets in the middle on bends) */}
+          <group rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.001, 0]}>
+            {SIDES.filter(s => connected[s]).map(s => {
+              const [dx, dz] = SIDE_DIRS[s];
+              return (
+                <mesh key={s} material={lineMat} position={[dx * 0.25, -dz * 0.25, 0]} rotation={[0, 0, dx !== 0 ? Math.PI / 2 : 0]} raycast={noRaycast}>
+                  <planeGeometry args={[0.06, 0.5]} />
+                </mesh>
+              );
+            })}
+            {connected.up !== connected.down && connected.left !== connected.right && (
+              <mesh material={lineMat} position={[0, 0, 0.001]} raycast={noRaycast}>
+                <planeGeometry args={[0.06, 0.06]} />
+              </mesh>
+            )}
+          </group>
+
+          {lampSide && <PavementSpot side={lampSide} along={0.25}><StreetLamp /></PavementSpot>}
+          {extraSide && furniture < 0.35 && <PavementSpot side={extraSide} along={extraAlong}><StreetTree /></PavementSpot>}
+          {extraSide && furniture >= 0.35 && furniture < 0.5 && <PavementSpot side={extraSide} along={extraAlong}><Bench /></PavementSpot>}
+          {extraSide && straight && furniture >= 0.5 && furniture < 0.62 && <PavementSpot side={extraSide} along={-0.15}><BusStop /></PavementSpot>}
+        </>
+      )}
     </group>
   );
 });
+
+// Floating "no road" sign over buildings that have no road next to them
+const NoRoadSign = () => {
+  const ref = useRef<THREE.Group>(null);
+  useFrame(({ clock }) => {
+    if (ref.current) ref.current.position.y = 1.5 + Math.sin(clock.elapsedTime * 3) * 0.06;
+  });
+  return (
+    <group ref={ref} position={[0, 1.5, 0]}>
+      <Billboard>
+        <mesh renderOrder={10} raycast={noRaycast}>
+          <circleGeometry args={[0.17, 24]} />
+          <meshBasicMaterial color="#dc2626" depthTest={false} transparent />
+        </mesh>
+        <mesh renderOrder={11} position={[0, 0, 0.001]} raycast={noRaycast}>
+          <planeGeometry args={[0.22, 0.06]} />
+          <meshBasicMaterial color="#ffffff" depthTest={false} transparent />
+        </mesh>
+      </Billboard>
+    </group>
+  );
+};
+
+// Grey smog drifting over houses polluted by a nearby factory
+const smogMat = new THREE.MeshStandardMaterial({ color: '#6b7280', transparent: true, opacity: 0.5, depthWrite: false, flatShading: true });
+const Smog = () => {
+  const ref = useRef<THREE.Group>(null);
+  useFrame(({ clock }) => {
+    if (!ref.current) return;
+    const t = clock.elapsedTime;
+    ref.current.rotation.y = t * 0.3;
+    ref.current.position.y = 1.15 + Math.sin(t * 0.8) * 0.05;
+  });
+  return (
+    <group ref={ref} position={[0, 1.15, 0]}>
+      <mesh geometry={sphereGeo} material={smogMat} position={[-0.15, 0, 0.05]} scale={0.16} raycast={noRaycast} />
+      <mesh geometry={sphereGeo} material={smogMat} position={[0.12, 0.05, -0.05]} scale={0.2} raycast={noRaycast} />
+      <mesh geometry={sphereGeo} material={smogMat} position={[0.02, 0.12, 0.12]} scale={0.13} raycast={noRaycast} />
+    </group>
+  );
+};
 
 interface GroundTileProps {
     type: BuildingType;
@@ -627,7 +1065,7 @@ const GroundTile = React.memo(({ type, x, y, grid, onHover, onLeave, onClick }: 
     const noise = getHash(x, y);
     color = noise > 0.7 ? '#059669' : noise > 0.3 ? '#10b981' : '#34d399';
     topY = -0.3 - noise * 0.1; // Slight height variation for grass
-  } else if (type === BuildingType.Road) {
+  } else if (isRoadType(type)) {
     color = '#374151';
     topY = -0.29; // slightly higher
   } else {
@@ -650,7 +1088,7 @@ const GroundTile = React.memo(({ type, x, y, grid, onHover, onLeave, onClick }: 
     >
       <boxGeometry args={[1, thickness, 1]} />
       <meshStandardMaterial color={color} flatShading roughness={1} />
-      {type === BuildingType.Road && <RoadMarkings x={x} y={y} grid={grid} yOffset={thickness / 2 + 0.001} />}
+      {isRoadType(type) && <RoadDetails x={x} y={y} grid={grid} yOffset={thickness / 2 + 0.001} />}
     </mesh>
   );
 });
@@ -771,7 +1209,7 @@ const MAX_PITCH = 1.2;
 const isRoad = (grid: Grid, gx: number, gy: number) => {
   const ix = Math.round(gx);
   const iy = Math.round(gy);
-  return ix >= 0 && iy >= 0 && ix < grid.length && iy < grid.length && grid[iy][ix].buildingType === BuildingType.Road;
+  return ix >= 0 && iy >= 0 && ix < grid.length && iy < grid.length && isRoadType(grid[iy][ix].buildingType);
 };
 
 // Start on the road nearest the map centre, facing along the road
@@ -780,7 +1218,7 @@ const findWalkSpawn = (grid: Grid) => {
   let best: { x: number; y: number } | null = null;
   let bestDist = Infinity;
   grid.forEach(row => row.forEach(tile => {
-    if (tile.buildingType !== BuildingType.Road) return;
+    if (!isRoadType(tile.buildingType)) return;
     const d = (tile.x - center) ** 2 + (tile.y - center) ** 2;
     if (d < bestDist) { bestDist = d; best = { x: tile.x, y: tile.y }; }
   }));
@@ -945,9 +1383,10 @@ interface IsoMapProps {
   onTileClick: (x: number, y: number) => void;
   hoveredTool: BuildingType;
   population: number;
+  commuters: number; // Employed citizens; each one adds to traffic
 }
 
-const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, population }) => {
+const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, population, commuters }) => {
   const [hoveredTile, setHoveredTile] = useState<{x: number, y: number} | null>(null);
   const [cameraView, setCameraView] = useState<CameraView>('3d');
   const [rotateRequest, setRotateRequest] = useState({ id: 0, step: 0 });
@@ -962,7 +1401,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
 
   const [walking, setWalking] = useState(false);
   const walkTouchInput = useRef<WalkInput>({ forward: 0, turn: 0 });
-  const hasRoads = useMemo(() => grid.some(row => row.some(t => t.buildingType === BuildingType.Road)), [grid]);
+  const hasRoads = useMemo(() => grid.some(row => row.some(t => isRoadType(t.buildingType))), [grid]);
 
   const toggleWalk = useCallback(() => {
     walkTouchInput.current = { forward: 0, turn: 0 };
@@ -1015,6 +1454,16 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
 
   const previewPos = hoveredTile ? gridToWorld(hoveredTile.x, hoveredTile.y, gridSize) : [0,0,0];
 
+  // Warning markers: buildings without a road, and houses under factory smog
+  const tileStatus = useMemo(() => grid.map(row => row.map(t => ({
+    noRoad: needsRoad(t.buildingType) && !hasRoadAccess(grid, t.x, t.y),
+    smog: isPolluted(grid, t.x, t.y),
+  }))), [grid]);
+
+  // A few cars always drive around; more join as commuters fill the roads (so jams show up as queues)
+  const roadCount = useMemo(() => grid.reduce((n, row) => n + row.filter(t => isRoadType(t.buildingType)).length, 0), [grid]);
+  const carCount = roadCount < 2 ? 0 : Math.min(MAX_CARS, roadCount * 3, Math.min(roadCount, 4) + Math.round(commuters / 3));
+
   return (
     <div className="absolute inset-0 bg-sky-900 touch-none">
       <Canvas shadows dpr={[1, 1.5]} gl={{ antialias: true }}>
@@ -1038,17 +1487,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
           </>
         )}
 
-        <ambientLight intensity={0.5} color="#cceeff" />
-        <directionalLight
-          castShadow
-          position={[15, 20, 10]}
-          intensity={2}
-          color="#fffbeb"
-          shadow-mapSize={[2048, 2048]}
-          shadow-camera-left={-shadowExtent} shadow-camera-right={shadowExtent}
-          shadow-camera-top={shadowExtent} shadow-camera-bottom={-shadowExtent}
-        >
-        </directionalLight>
+        <DayNightCycle shadowExtent={shadowExtent} />
         <Environment preset="city" />
 
         <EnvironmentEffects size={gridSize} />
@@ -1072,13 +1511,15 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
                 
                 {/* Building visual - apply world position to group to align with ground tile */}
                 <group position={[wx, 0, wz]} raycast={() => null}>
-                    {tile.buildingType !== BuildingType.None && tile.buildingType !== BuildingType.Road && (
+                    {tile.buildingType !== BuildingType.None && !isRoadType(tile.buildingType) && (
                       <ProceduralBuilding 
                         type={tile.buildingType} 
                         baseColor={BUILDINGS[tile.buildingType].color} 
-                        x={x} y={y} 
+                        x={x} y={y}
                       />
                     )}
+                    {tileStatus[y][x].noRoad && <NoRoadSign />}
+                    {tileStatus[y][x].smog && <Smog />}
                 </group>
               </React.Fragment>
             )})
@@ -1086,7 +1527,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
 
           {/* Visual Elements - disable pointer events */}
           <group raycast={() => null}>
-            <TrafficSystem grid={grid} />
+            <TrafficSystem grid={grid} carCount={carCount} />
             <PopulationSystem population={population} grid={grid} />
 
             {/* Placement Preview */}

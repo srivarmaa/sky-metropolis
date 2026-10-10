@@ -10,11 +10,18 @@ import UIOverlay from './components/UIOverlay';
 import StartScreen from './components/StartScreen';
 import { generateCityGoal, generateNewsEvent, isAiAvailable } from './services/geminiService';
 import { createEmptyGrid, downloadLayout } from './services/layoutFile';
-import { computeEconomy, findEconomyProblems, EconomyProblem, EMPTY_ECONOMY } from './services/economy';
+import { computeEconomy, computePopulation, findEconomyProblems, EconomyProblem, EMPTY_ECONOMY } from './services/economy';
+import { analyzeCity } from './services/city';
 
-const ECONOMY_PROBLEM_NEWS: Record<EconomyProblem, string> = {
+type CityProblem = EconomyProblem | 'treasury_empty';
+
+const ECONOMY_PROBLEM_NEWS: Record<CityProblem, string> = {
   idle_factories: 'Factories are idle: no workers. Build houses to bring in citizens.',
   shops_no_customers: 'Shops have no paying customers. Citizens need jobs before they can spend.',
+  no_road_access: 'Some buildings have no road next to them and sit empty. Connect them with a road.',
+  traffic_jam: 'Traffic jams! Commuters are clogging the roads and factory deliveries are slowing down. Build more roads.',
+  pollution: 'Factory smog is driving families out of nearby houses. A park next to those homes cleans the air.',
+  treasury_empty: 'The treasury is empty: road and signal upkeep is going unpaid. Grow income or bulldoze unused roads.',
 };
 
 function App() {
@@ -37,7 +44,7 @@ function App() {
   const statsRef = useRef(stats);
   const goalRef = useRef(currentGoal);
   const aiEnabledRef = useRef(aiEnabled);
-  const economyProblemsRef = useRef<EconomyProblem[]>([]);
+  const economyProblemsRef = useRef<CityProblem[]>([]);
 
   // Sync refs
   useEffect(() => { gridRef.current = grid; }, [grid]);
@@ -93,43 +100,29 @@ function App() {
     if (!gameStarted) return;
 
     const intervalId = setInterval(() => {
-      // 1. Count buildings and population growth
-      let dailyPopGrowth = 0;
-      let buildingCounts: Record<string, number> = {};
-
-      gridRef.current.flat().forEach(tile => {
-        if (tile.buildingType !== BuildingType.None) {
-          const config = BUILDINGS[tile.buildingType];
-          dailyPopGrowth += config.popGen;
-          buildingCounts[tile.buildingType] = (buildingCounts[tile.buildingType] || 0) + 1;
-        }
-      });
-
-      // Cap population growth by residential count just for some logic
-      const resCount = buildingCounts[BuildingType.Residential] || 0;
-      const maxPop = resCount * 50; // 50 people per house max
+      // 1. Analyse the city (road access, pollution) and update population (limited by homes and jobs)
+      const city = analyzeCity(gridRef.current);
+      const buildingCounts = city.counts;
 
       // Population only changes here, so the ref is current
-      const prevPop = statsRef.current.population;
-      let newPop = prevPop + dailyPopGrowth;
-      if (newPop > maxPop) newPop = maxPop; // limit
-      if (resCount === 0 && prevPop > 0) newPop = Math.max(0, prevPop - 5); // people leave if no homes
+      const newPop = computePopulation(city, statsRef.current.population);
 
-      // 2. Economy: income depends on workers and paying customers
-      const report = computeEconomy(buildingCounts, newPop);
+      // 2. Economy: income depends on workers, paying customers and traffic, minus road upkeep
+      const report = computeEconomy(city, newPop);
       setEconomy(report);
 
       // Announce economy problems once, when they first appear
-      const problems = findEconomyProblems(buildingCounts, report);
+      const problems: CityProblem[] = findEconomyProblems(city, report);
+      if (statsRef.current.money + report.income <= 0 && report.income < 0) problems.push('treasury_empty');
       problems.filter(p => !economyProblemsRef.current.includes(p)).forEach(p => {
         addNewsItem({ id: Date.now().toString() + Math.random(), text: ECONOMY_PROBLEM_NEWS[p], type: 'negative' });
       });
       economyProblemsRef.current = problems;
 
-      // 3. Update Stats
+      // 3. Update Stats (the treasury can't go below zero; unpaid upkeep is just lost)
       setStats(prev => {
         const newStats = {
-          money: prev.money + report.income,
+          money: Math.max(0, prev.money + report.income),
           population: newPop,
           day: prev.day + 1,
         };
@@ -192,6 +185,20 @@ function App() {
       return;
     }
 
+    // Upgrade an existing road to a roundabout, paying only the difference
+    if (tool === BuildingType.Roundabout && currentTile.buildingType === BuildingType.Road) {
+      const upgradeCost = buildingConfig.cost - BUILDINGS[BuildingType.Road].cost;
+      if (currentStats.money >= upgradeCost) {
+        setStats(prev => ({ ...prev, money: prev.money - upgradeCost }));
+        const newGrid = currentGrid.map(row => [...row]);
+        newGrid[y][x] = { ...currentTile, buildingType: tool };
+        setGrid(newGrid);
+      } else {
+        addNewsItem({id: Date.now().toString() + Math.random(), text: `Treasury insufficient for a roundabout upgrade ($${upgradeCost}).`, type: 'negative'});
+      }
+      return;
+    }
+
     // Placement Logic
     if (currentTile.buildingType === BuildingType.None) {
       if (currentStats.money >= buildingConfig.cost) {
@@ -238,6 +245,7 @@ function App() {
         onTileClick={handleTileClick} 
         hoveredTool={selectedTool}
         population={stats.population}
+        commuters={economy.workers}
       />
       
       {/* Start Screen Overlay */}

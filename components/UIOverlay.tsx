@@ -23,6 +23,7 @@ interface UIOverlayProps {
 const tools = [
   BuildingType.None, // Bulldoze
   BuildingType.Road,
+  BuildingType.Roundabout,
   BuildingType.Residential,
   BuildingType.Commercial,
   BuildingType.Industrial,
@@ -57,6 +58,7 @@ const ToolButton: React.FC<{
       <div className="w-6 h-6 md:w-8 md:h-8 rounded mb-0.5 md:mb-1 border border-black/30 shadow-inner flex items-center justify-center overflow-hidden" style={{ backgroundColor: isBulldoze ? 'transparent' : bgColor }}>
         {isBulldoze && <div className="w-full h-full bg-red-600 text-white flex justify-center items-center font-bold text-base md:text-lg">✕</div>}
         {type === BuildingType.Road && <div className="w-full h-2 bg-gray-800 transform -rotate-45"></div>}
+        {type === BuildingType.Roundabout && <div className="w-3.5 h-3.5 md:w-4 md:h-4 rounded-full bg-green-500 border-2 border-white/90"></div>}
       </div>
       <span className="text-[8px] md:text-[10px] font-bold text-white uppercase tracking-wider drop-shadow-md leading-none">{config.name}</span>
       {config.cost > 0 && (
@@ -99,16 +101,26 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
             <span className="text-[8px] md:text-[10px] text-gray-400 uppercase font-bold tracking-widest">Treasury</span>
             <span className="text-lg md:text-2xl font-black text-green-400 font-mono drop-shadow-md">${stats.money.toLocaleString()}</span>
             <span
-              className={`text-[9px] md:text-[10px] font-mono font-bold leading-none ${economy.income > 0 ? 'text-green-300/80' : 'text-gray-500'}`}
-              title={`Factories $${Math.round(economy.factoryIncome)} + Shops $${Math.round(economy.shopIncome)} per day`}
+              className={`text-[9px] md:text-[10px] font-mono font-bold leading-none ${economy.income > 0 ? 'text-green-300/80' : economy.income < 0 ? 'text-red-400' : 'text-gray-500'}`}
+              title={`Factories $${Math.round(economy.factoryIncome)} + Shops $${Math.round(economy.shopIncome)} − Road & signal upkeep $${economy.upkeep.toFixed(2)} per day`}
             >
-              +${economy.income.toLocaleString()}/day
+              {economy.income >= 0 ? '+' : '−'}${Math.abs(economy.income).toLocaleString()}/day
             </span>
           </div>
           <div className="w-px h-6 md:h-8 bg-gray-700"></div>
-          <div className="flex flex-col">
+          <div
+            className="flex flex-col"
+            title={[
+              `${stats.population} citizens in ${economy.housing} homes. People move in while there are free homes and jobs, and move out when there is no work.`,
+              economy.unconnected > 0 ? `${economy.unconnected} building(s) have no road next to them and sit empty.` : '',
+              economy.pollutedHomes > 0 ? `${economy.pollutedHomes} house(s) lost half their homes to factory smog — a park next to them cleans the air.` : '',
+            ].filter(Boolean).join('\n')}
+          >
             <span className="text-[8px] md:text-[10px] text-gray-400 uppercase font-bold tracking-widest">Citizens</span>
-            <span className="text-base md:text-xl font-bold text-blue-300 font-mono drop-shadow-md">{stats.population.toLocaleString()}</span>
+            <span className="text-base md:text-xl font-bold font-mono drop-shadow-md">
+              <span className="text-blue-300">{stats.population.toLocaleString()}</span>
+              <span className="text-gray-500 text-xs md:text-sm"> / {economy.housing.toLocaleString()}</span>
+            </span>
           </div>
           <div className="w-px h-6 md:h-8 bg-gray-700"></div>
           <div
@@ -119,6 +131,16 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
             <span className="text-base md:text-xl font-bold font-mono drop-shadow-md">
               <span className={economy.jobs > 0 && economy.staffing < 0.5 ? 'text-amber-300' : 'text-orange-200'}>{economy.workers.toLocaleString()}</span>
               <span className="text-gray-500 text-xs md:text-sm"> / {economy.jobs.toLocaleString()}</span>
+            </span>
+          </div>
+          <div className="w-px h-6 md:h-8 bg-gray-700"></div>
+          <div
+            className="flex flex-col"
+            title={`Commuters use ${Math.round(economy.trafficLoad * 100)}% of road capacity. Above 100% the roads jam and factories deliver only ${Math.round(economy.deliveryEfficiency * 100)}% of their goods. Build more roads to ease traffic.`}
+          >
+            <span className="text-[8px] md:text-[10px] text-gray-400 uppercase font-bold tracking-widest">Traffic</span>
+            <span className={`text-base md:text-xl font-bold font-mono drop-shadow-md ${economy.trafficLoad > 1 ? 'text-red-400' : economy.trafficLoad > 0.75 ? 'text-amber-300' : 'text-emerald-300'}`}>
+              {Math.round(economy.trafficLoad * 100)}%
             </span>
           </div>
           <div className="w-px h-6 md:h-8 bg-gray-700"></div>

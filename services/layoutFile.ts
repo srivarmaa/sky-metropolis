@@ -14,6 +14,7 @@ const LAYOUT_VERSION = 1;
 const TILE_CODES: Record<BuildingType, string> = {
   [BuildingType.None]: '.',
   [BuildingType.Road]: 'R',
+  [BuildingType.Roundabout]: 'O',
   [BuildingType.Residential]: 'H',
   [BuildingType.Commercial]: 'C',
   [BuildingType.Industrial]: 'I',
