@@ -3,13 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Grid, BuildingType, CityStats, AIGoal, NewsItem } from './types';
+import { Grid, BuildingType, CityStats, AIGoal, NewsItem, EconomyReport } from './types';
 import { GRID_SIZE, BUILDINGS, TICK_RATE_MS, INITIAL_MONEY } from './constants';
 import IsoMap from './components/IsoMap';
 import UIOverlay from './components/UIOverlay';
 import StartScreen from './components/StartScreen';
 import { generateCityGoal, generateNewsEvent, isAiAvailable } from './services/geminiService';
 import { createEmptyGrid, downloadLayout } from './services/layoutFile';
+import { computeEconomy, findEconomyProblems, EconomyProblem, EMPTY_ECONOMY } from './services/economy';
+
+const ECONOMY_PROBLEM_NEWS: Record<EconomyProblem, string> = {
+  idle_factories: 'Factories are idle: no workers. Build houses to bring in citizens.',
+  shops_no_customers: 'Shops have no paying customers. Citizens need jobs before they can spend.',
+};
 
 function App() {
   // --- Game State ---
@@ -19,6 +25,7 @@ function App() {
   const [grid, setGrid] = useState<Grid>(() => createEmptyGrid(GRID_SIZE));
   const [stats, setStats] = useState<CityStats>({ money: INITIAL_MONEY, population: 0, day: 1 });
   const [selectedTool, setSelectedTool] = useState<BuildingType>(BuildingType.Road);
+  const [economy, setEconomy] = useState<EconomyReport>(EMPTY_ECONOMY);
   
   // --- AI State ---
   const [currentGoal, setCurrentGoal] = useState<AIGoal | null>(null);
@@ -30,6 +37,7 @@ function App() {
   const statsRef = useRef(stats);
   const goalRef = useRef(currentGoal);
   const aiEnabledRef = useRef(aiEnabled);
+  const economyProblemsRef = useRef<EconomyProblem[]>([]);
 
   // Sync refs
   useEffect(() => { gridRef.current = grid; }, [grid]);
@@ -85,15 +93,13 @@ function App() {
     if (!gameStarted) return;
 
     const intervalId = setInterval(() => {
-      // 1. Calculate income/pop gen
-      let dailyIncome = 0;
+      // 1. Count buildings and population growth
       let dailyPopGrowth = 0;
       let buildingCounts: Record<string, number> = {};
 
       gridRef.current.flat().forEach(tile => {
         if (tile.buildingType !== BuildingType.None) {
           const config = BUILDINGS[tile.buildingType];
-          dailyIncome += config.incomeGen;
           dailyPopGrowth += config.popGen;
           buildingCounts[tile.buildingType] = (buildingCounts[tile.buildingType] || 0) + 1;
         }
@@ -103,19 +109,32 @@ function App() {
       const resCount = buildingCounts[BuildingType.Residential] || 0;
       const maxPop = resCount * 50; // 50 people per house max
 
-      // 2. Update Stats
-      setStats(prev => {
-        let newPop = prev.population + dailyPopGrowth;
-        if (newPop > maxPop) newPop = maxPop; // limit
-        if (resCount === 0 && prev.population > 0) newPop = Math.max(0, prev.population - 5); // people leave if no homes
+      // Population only changes here, so the ref is current
+      const prevPop = statsRef.current.population;
+      let newPop = prevPop + dailyPopGrowth;
+      if (newPop > maxPop) newPop = maxPop; // limit
+      if (resCount === 0 && prevPop > 0) newPop = Math.max(0, prevPop - 5); // people leave if no homes
 
+      // 2. Economy: income depends on workers and paying customers
+      const report = computeEconomy(buildingCounts, newPop);
+      setEconomy(report);
+
+      // Announce economy problems once, when they first appear
+      const problems = findEconomyProblems(buildingCounts, report);
+      problems.filter(p => !economyProblemsRef.current.includes(p)).forEach(p => {
+        addNewsItem({ id: Date.now().toString() + Math.random(), text: ECONOMY_PROBLEM_NEWS[p], type: 'negative' });
+      });
+      economyProblemsRef.current = problems;
+
+      // 3. Update Stats
+      setStats(prev => {
         const newStats = {
-          money: prev.money + dailyIncome,
+          money: prev.money + report.income,
           population: newPop,
           day: prev.day + 1,
         };
         
-        // 3. Check Goal Completion
+        // 4. Check Goal Completion
         const goal = goalRef.current;
         if (aiEnabledRef.current && goal && !goal.completed) {
           let isMet = false;
@@ -133,13 +152,13 @@ function App() {
         return newStats;
       });
 
-      // 4. Trigger news
+      // 5. Trigger news
       fetchNews();
 
     }, TICK_RATE_MS);
 
     return () => clearInterval(intervalId);
-  }, [fetchNews, gameStarted]);
+  }, [fetchNews, addNewsItem, gameStarted]);
 
 
   // --- Interaction Logic ---
@@ -238,6 +257,7 @@ function App() {
           isGeneratingGoal={isGeneratingGoal}
           aiEnabled={aiEnabled}
           onSaveLayout={handleSaveLayout}
+          economy={economy}
         />
       )}
 

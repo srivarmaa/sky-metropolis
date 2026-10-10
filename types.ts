@@ -18,7 +18,8 @@ export interface BuildingConfig {
   description: string;
   color: string; // Main color for 3D material
   popGen: number; // Population generation per tick
-  incomeGen: number; // Money generation per tick
+  incomeGen: number; // Maximum money per tick (needs workers / paying customers)
+  jobs: number; // Workers this building employs
 }
 
 export interface TileData {
@@ -30,6 +31,18 @@ export interface TileData {
 }
 
 export type Grid = TileData[][];
+
+// Daily economy breakdown (see services/economy.ts)
+export interface EconomyReport {
+  jobs: number;
+  workers: number; // Employed citizens: min(population, jobs)
+  staffing: number; // 0..1, share of jobs filled
+  factoryIncome: number;
+  shopIncome: number;
+  shopCapacity: number; // What shops could sell with enough paying customers
+  spending: number; // Employed citizens' daily shopping money
+  income: number; // Rounded total added to the treasury
+}
 
 export interface CityStats {
   money: number;

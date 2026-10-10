@@ -61,7 +61,7 @@ export const generateCityGoal = async (stats: CityStats, grid: Grid): Promise<AI
     Population: ${stats.population}
     Buildings: ${JSON.stringify(counts)}
     Building Costs/Stats: ${JSON.stringify(
-      Object.values(BUILDINGS).filter(b => b.type !== BuildingType.None).map(b => ({type: b.type, cost: b.cost, pop: b.popGen, income: b.incomeGen}))
+      Object.values(BUILDINGS).filter(b => b.type !== BuildingType.None).map(b => ({type: b.type, cost: b.cost, pop: b.popGen, maxIncome: b.incomeGen, jobs: b.jobs}))
     )}
   `;
 

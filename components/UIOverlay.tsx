@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useEffect, useRef } from 'react';
-import { BuildingType, CityStats, AIGoal, NewsItem } from '../types';
+import { BuildingType, CityStats, AIGoal, NewsItem, EconomyReport } from '../types';
 import { BUILDINGS } from '../constants';
 import { DownloadIcon } from './Icons';
 
@@ -17,6 +17,7 @@ interface UIOverlayProps {
   isGeneratingGoal: boolean;
   aiEnabled: boolean;
   onSaveLayout: () => void;
+  economy: EconomyReport;
 }
 
 const tools = [
@@ -74,7 +75,8 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
   onClaimReward,
   isGeneratingGoal,
   aiEnabled,
-  onSaveLayout
+  onSaveLayout,
+  economy
 }) => {
   const newsRef = useRef<HTMLDivElement>(null);
 
@@ -96,11 +98,28 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
           <div className="flex flex-col">
             <span className="text-[8px] md:text-[10px] text-gray-400 uppercase font-bold tracking-widest">Treasury</span>
             <span className="text-lg md:text-2xl font-black text-green-400 font-mono drop-shadow-md">${stats.money.toLocaleString()}</span>
+            <span
+              className={`text-[9px] md:text-[10px] font-mono font-bold leading-none ${economy.income > 0 ? 'text-green-300/80' : 'text-gray-500'}`}
+              title={`Factories $${Math.round(economy.factoryIncome)} + Shops $${Math.round(economy.shopIncome)} per day`}
+            >
+              +${economy.income.toLocaleString()}/day
+            </span>
           </div>
           <div className="w-px h-6 md:h-8 bg-gray-700"></div>
           <div className="flex flex-col">
             <span className="text-[8px] md:text-[10px] text-gray-400 uppercase font-bold tracking-widest">Citizens</span>
             <span className="text-base md:text-xl font-bold text-blue-300 font-mono drop-shadow-md">{stats.population.toLocaleString()}</span>
+          </div>
+          <div className="w-px h-6 md:h-8 bg-gray-700"></div>
+          <div
+            className="flex flex-col"
+            title={`${economy.workers} employed of ${economy.jobs} jobs. Only employed citizens have money to spend at shops.`}
+          >
+            <span className="text-[8px] md:text-[10px] text-gray-400 uppercase font-bold tracking-widest">Jobs</span>
+            <span className="text-base md:text-xl font-bold font-mono drop-shadow-md">
+              <span className={economy.jobs > 0 && economy.staffing < 0.5 ? 'text-amber-300' : 'text-orange-200'}>{economy.workers.toLocaleString()}</span>
+              <span className="text-gray-500 text-xs md:text-sm"> / {economy.jobs.toLocaleString()}</span>
+            </span>
           </div>
           <div className="w-px h-6 md:h-8 bg-gray-700"></div>
           <div className="flex flex-col items-end">
