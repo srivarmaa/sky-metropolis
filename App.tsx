@@ -3,38 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Grid, TileData, BuildingType, CityStats, AIGoal, NewsItem } from './types';
+import { Grid, BuildingType, CityStats, AIGoal, NewsItem } from './types';
 import { GRID_SIZE, BUILDINGS, TICK_RATE_MS, INITIAL_MONEY } from './constants';
 import IsoMap from './components/IsoMap';
 import UIOverlay from './components/UIOverlay';
 import StartScreen from './components/StartScreen';
 import { generateCityGoal, generateNewsEvent, isAiAvailable } from './services/geminiService';
-
-// Initialize empty grid with island shape generation for 3D visual interest
-const createInitialGrid = (): Grid => {
-  const grid: Grid = [];
-  const center = GRID_SIZE / 2;
-  // const radius = GRID_SIZE / 2 - 1;
-
-  for (let y = 0; y < GRID_SIZE; y++) {
-    const row: TileData[] = [];
-    for (let x = 0; x < GRID_SIZE; x++) {
-      // Simple circle crop for island look
-      const dist = Math.sqrt((x-center)*(x-center) + (y-center)*(y-center));
-      
-      row.push({ x, y, buildingType: BuildingType.None });
-    }
-    grid.push(row);
-  }
-  return grid;
-};
+import { createEmptyGrid, downloadLayout } from './services/layoutFile';
 
 function App() {
   // --- Game State ---
   const [gameStarted, setGameStarted] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(isAiAvailable);
 
-  const [grid, setGrid] = useState<Grid>(createInitialGrid);
+  const [grid, setGrid] = useState<Grid>(() => createEmptyGrid(GRID_SIZE));
   const [stats, setStats] = useState<CityStats>({ money: INITIAL_MONEY, population: 0, day: 1 });
   const [selectedTool, setSelectedTool] = useState<BuildingType>(BuildingType.Road);
   
@@ -169,7 +151,7 @@ function App() {
     const currentStats = statsRef.current;
     const tool = selectedTool; // Capture current tool
     
-    if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return;
+    if (y < 0 || y >= currentGrid.length || x < 0 || x >= currentGrid[y].length) return;
 
     const currentTile = currentGrid[y][x];
     const buildingConfig = BUILDINGS[tool];
@@ -218,10 +200,16 @@ function App() {
     }
   };
 
-  const handleStart = (enabled: boolean) => {
+  // The grid (chosen size or uploaded layout) is already set by the start screen preview
+  const handleStart = (enabled: boolean, savedStats: CityStats | null) => {
+    if (savedStats) setStats(savedStats);
     setAiEnabled(enabled);
     setGameStarted(true);
   };
+
+  const handleSaveLayout = useCallback(() => {
+    downloadLayout(gridRef.current, statsRef.current);
+  }, []);
 
   return (
     <div className="relative w-screen h-screen overflow-hidden selection:bg-transparent selection:text-transparent bg-sky-900">
@@ -235,7 +223,7 @@ function App() {
       
       {/* Start Screen Overlay */}
       {!gameStarted && (
-        <StartScreen onStart={handleStart} aiAvailable={isAiAvailable} />
+        <StartScreen onStart={handleStart} aiAvailable={isAiAvailable} defaultGridSize={GRID_SIZE} onPreviewGrid={setGrid} />
       )}
 
       {/* UI Layer */}
@@ -249,6 +237,7 @@ function App() {
           onClaimReward={handleClaimReward}
           isGeneratingGoal={isGeneratingGoal}
           aiEnabled={aiEnabled}
+          onSaveLayout={handleSaveLayout}
         />
       )}
 

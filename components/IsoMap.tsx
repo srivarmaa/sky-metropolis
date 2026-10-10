@@ -4,11 +4,15 @@
 */
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { Canvas, useFrame, useThree, ThreeElements } from '@react-three/fiber';
-import { MapControls, Environment, SoftShadows, Instance, Instances, Float, useTexture, Outlines, OrthographicCamera } from '@react-three/drei';
+import { MapControls, Environment, SoftShadows, Instance, Instances, Float, useTexture, Outlines, OrthographicCamera, PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { MathUtils } from 'three';
 import { Grid, BuildingType, TileData } from '../types';
-import { GRID_SIZE, BUILDINGS } from '../constants';
+import { BUILDINGS } from '../constants';
+import {
+  TopViewIcon, PerspectiveIcon, RotateLeftIcon, RotateRightIcon, WalkIcon, CloseIcon,
+  ChevronUpIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon,
+} from './Icons';
 
 // Fix for TypeScript not recognizing R3F elements in JSX
 declare global {
@@ -18,8 +22,11 @@ declare global {
 }
 
 // --- Constants & Helpers ---
-const WORLD_OFFSET = GRID_SIZE / 2 - 0.5;
-const gridToWorld = (x: number, y: number) => [x - WORLD_OFFSET, 0, y - WORLD_OFFSET] as [number, number, number];
+// The grid is centred on the world origin; `size` is the grid's width (grids are square)
+const gridToWorld = (x: number, y: number, size: number) => {
+  const offset = size / 2 - 0.5;
+  return [x - offset, 0, y - offset] as [number, number, number];
+};
 
 // Deterministic random based on coordinates
 const getHash = (x: number, y: number) => Math.abs(Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1;
@@ -352,7 +359,7 @@ const TrafficSystem = ({ grid }: { grid: Grid }) => {
       const offX = (-dy/len) * offsetAmt;
       const offY = (dx/len) * offsetAmt;
 
-      const [wx, _, wz] = gridToWorld(gx + offX, gy + offY);
+      const [wx, _, wz] = gridToWorld(gx + offX, gy + offY, grid.length);
 
       // Road surface is approx -0.3. Car height 0.15.
       dummy.position.set(wx, -0.3 + 0.075, wz);
@@ -459,7 +466,7 @@ const PopulationSystem = ({ population, grid }: { population: number, grid: Grid
                 agentsState.current[idx+1] = y;
             }
 
-            const [wx, _, wz] = gridToWorld(x, y);
+            const [wx, _, wz] = gridToWorld(x, y, grid.length);
 
             // Walking bounce
             const bounce = Math.abs(Math.sin(time * 10 + animOffset)) * 0.03;
@@ -490,12 +497,12 @@ const PopulationSystem = ({ population, grid }: { population: number, grid: Grid
 };
 
 // Clouds & Birds
-const Cloud = ({ position, scale, speed }: { position: [number, number, number], scale: number, speed: number }) => {
+const Cloud = ({ position, scale, speed, size }: { position: [number, number, number], scale: number, speed: number, size: number }) => {
     const group = useRef<THREE.Group>(null);
     useFrame((state, delta) => {
         if (group.current) {
             group.current.position.x += speed * delta;
-            if (group.current.position.x > GRID_SIZE * 1.5) group.current.position.x = -GRID_SIZE * 1.5;
+            if (group.current.position.x > size * 1.5) group.current.position.x = -size * 1.5;
         }
     });
 
@@ -515,13 +522,13 @@ const Cloud = ({ position, scale, speed }: { position: [number, number, number],
     )
 }
 
-const Bird = ({ position, speed, offset }: { position: [number, number, number], speed: number, offset: number }) => {
+const Bird = ({ position, speed, offset, size }: { position: [number, number, number], speed: number, offset: number, size: number }) => {
     const ref = useRef<THREE.Group>(null);
     useFrame((state) => {
         if(ref.current) {
             const time = state.clock.elapsedTime + offset;
-            ref.current.position.x = position[0] + Math.sin(time * speed) * GRID_SIZE;
-            ref.current.position.z = position[1] + Math.cos(time * speed) * GRID_SIZE/2;
+            ref.current.position.x = position[0] + Math.sin(time * speed) * size;
+            ref.current.position.z = position[1] + Math.cos(time * speed) * size/2;
             ref.current.rotation.y = -time * speed + Math.PI;
             ref.current.scale.y = 1 + Math.sin(time * 15) * 0.3;
         }
@@ -535,24 +542,24 @@ const Bird = ({ position, speed, offset }: { position: [number, number, number],
     )
 }
 
-const EnvironmentEffects = () => {
+const EnvironmentEffects = ({ size }: { size: number }) => {
     return (
         <group raycast={() => null}>
              {/* Clouds */}
-            <Cloud position={[-12, 8, 4]} scale={1.5} speed={0.3} />
-            <Cloud position={[5, 9, -8]} scale={1.2} speed={0.5} />
-            <Cloud position={[15, 7, 10]} scale={1.8} speed={0.2} />
+            <Cloud position={[-12, 8, 4]} scale={1.5} speed={0.3} size={size} />
+            <Cloud position={[5, 9, -8]} scale={1.2} speed={0.5} size={size} />
+            <Cloud position={[15, 7, 10]} scale={1.8} speed={0.2} size={size} />
             
             {/* Birds */}
             <group position={[0, 0, 0]} scale={0.8}>
-                <Bird position={[0, 0, 10]} speed={0.6} offset={0} />
-                <Bird position={[0, 0, 10]} speed={0.6} offset={1.2} />
-                <Bird position={[0, 0, 10]} speed={0.6} offset={2.5} />
+                <Bird position={[0, 0, 10]} speed={0.6} offset={0} size={size} />
+                <Bird position={[0, 0, 10]} speed={0.6} offset={1.2} size={size} />
+                <Bird position={[0, 0, 10]} speed={0.6} offset={2.5} size={size} />
             </group>
 
             {/* Water */}
             <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.6, 0]} receiveShadow>
-                <planeGeometry args={[GRID_SIZE * 4, GRID_SIZE * 4]} />
+                <planeGeometry args={[size * 4, size * 4]} />
                 <meshStandardMaterial color="#3b82f6" roughness={0.1} metalness={0.5} opacity={0.8} transparent />
             </mesh>
         </group>
@@ -567,9 +574,9 @@ const RoadMarkings = React.memo(({ x, y, grid, yOffset }: { x: number; y: number
   const lineGeo = useMemo(() => new THREE.PlaneGeometry(0.1, 0.5), []);
 
   const hasUp = y > 0 && grid[y - 1][x].buildingType === BuildingType.Road;
-  const hasDown = y < GRID_SIZE - 1 && grid[y + 1][x].buildingType === BuildingType.Road;
+  const hasDown = y < grid.length - 1 && grid[y + 1][x].buildingType === BuildingType.Road;
   const hasLeft = x > 0 && grid[y][x - 1].buildingType === BuildingType.Road;
-  const hasRight = x < GRID_SIZE - 1 && grid[y][x + 1].buildingType === BuildingType.Road;
+  const hasRight = x < grid.length - 1 && grid[y][x + 1].buildingType === BuildingType.Road;
 
   const connections = [hasUp, hasDown, hasLeft, hasRight].filter(Boolean).length;
   
@@ -609,7 +616,7 @@ interface GroundTileProps {
 
 // Ground Tile: Handles pointer events and forms base terrain
 const GroundTile = React.memo(({ type, x, y, grid, onHover, onLeave, onClick }: GroundTileProps) => {
-  const [wx, _, wz] = gridToWorld(x, y);
+  const [wx, _, wz] = gridToWorld(x, y, grid.length);
   
   let color = '#10b981';
   // Base level for tiles, slightly varying
@@ -649,8 +656,8 @@ const GroundTile = React.memo(({ type, x, y, grid, onHover, onLeave, onClick }: 
 });
 
 // Selection/Hover Cursor
-const Cursor = ({ x, y, color }: { x: number, y: number, color: string }) => {
-  const [wx, _, wz] = gridToWorld(x, y);
+const Cursor = ({ x, y, color, size }: { x: number, y: number, color: string, size: number }) => {
+  const [wx, _, wz] = gridToWorld(x, y, size);
   return (
     <mesh position={[wx, -0.25, wz]} rotation={[-Math.PI / 2, 0, 0]} raycast={() => null}>
       <planeGeometry args={[1, 1]} />
@@ -661,6 +668,278 @@ const Cursor = ({ x, y, color }: { x: number, y: number, color: string }) => {
 };
 
 
+// --- Camera Views ---
+
+type CameraView = '3d' | 'top';
+
+const ISO_POLAR = 0.955; // Matches the initial [20, 20, 20] camera angle
+const TOP_POLAR = 0.0001; // Straight down (exactly 0 breaks azimuth rotation)
+const MIN_TILT_POLAR = 0.1;
+const MAX_TILT_POLAR = Math.PI / 2.2;
+const ROTATE_STEP = Math.PI / 4;
+
+// Shortest signed difference between two angles
+const angleDelta = (from: number, to: number) => {
+  const d = (to - from) % (Math.PI * 2);
+  return d > Math.PI ? d - Math.PI * 2 : d < -Math.PI ? d + Math.PI * 2 : d;
+};
+
+interface CameraRigProps {
+  view: CameraView;
+  rotateRequest: { id: number; step: number };
+}
+
+// Smoothly animates the orbit controls between 3D/top views and in 45° rotation steps.
+const CameraRig = ({ view, rotateRequest }: CameraRigProps) => {
+  const camera = useThree(state => state.camera);
+  const controls = useThree(state => state.controls) as any;
+  const target = useRef<{ polar: number | null; azimuth: number | null }>({ polar: null, azimuth: null });
+  const spherical = useMemo(() => new THREE.Spherical(), []);
+  const offset = useMemo(() => new THREE.Vector3(), []);
+
+  useEffect(() => {
+    if (!controls) return;
+    target.current.polar = view === 'top' ? TOP_POLAR : ISO_POLAR;
+    // Allow the full range while animating; limits are re-applied when it settles
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = MAX_TILT_POLAR;
+  }, [view, controls]);
+
+  useEffect(() => {
+    if (!controls || rotateRequest.id === 0) return;
+    const base = target.current.azimuth ?? controls.getAzimuthalAngle();
+    target.current.azimuth = base + rotateRequest.step;
+  }, [rotateRequest, controls]);
+
+  useFrame((_, delta) => {
+    const t = target.current;
+    if (!controls || (t.polar === null && t.azimuth === null)) return;
+
+    offset.copy(camera.position).sub(controls.target);
+    spherical.setFromVector3(offset);
+
+    const ease = 1 - Math.exp(-10 * delta);
+    let settled = true;
+
+    if (t.polar !== null) {
+      const d = t.polar - spherical.phi;
+      if (Math.abs(d) < 0.001) {
+        spherical.phi = t.polar;
+      } else {
+        spherical.phi += d * ease;
+        settled = false;
+      }
+    }
+    if (t.azimuth !== null) {
+      const d = angleDelta(spherical.theta, t.azimuth);
+      if (Math.abs(d) < 0.001) {
+        spherical.theta += d;
+      } else {
+        spherical.theta += d * ease;
+        settled = false;
+      }
+    }
+
+    offset.setFromSpherical(spherical);
+    camera.position.copy(controls.target).add(offset);
+    camera.lookAt(controls.target);
+
+    if (settled) {
+      // Top view locks the tilt; drag-rotate still spins the map
+      controls.minPolarAngle = view === 'top' ? TOP_POLAR : MIN_TILT_POLAR;
+      controls.maxPolarAngle = view === 'top' ? TOP_POLAR : MAX_TILT_POLAR;
+      t.polar = null;
+      t.azimuth = null;
+    }
+    controls.update();
+  });
+
+  return null;
+};
+
+// --- Walk View ---
+
+const ROAD_SURFACE_Y = -0.29; // Matches the road GroundTile top
+const EYE_HEIGHT = 0.17; // Just above the 0.2-tall citizens
+const WALK_SPEED = 1.2; // Tiles per second
+const RUN_MULTIPLIER = 2.2;
+const TURN_SPEED = 2; // Radians per second (keyboard / touch)
+const LOOK_SENSITIVITY = 0.005;
+const BODY_RADIUS = 0.12; // Keeps the camera from clipping into buildings beside the road
+const MAX_PITCH = 1.2;
+
+const isRoad = (grid: Grid, gx: number, gy: number) => {
+  const ix = Math.round(gx);
+  const iy = Math.round(gy);
+  return ix >= 0 && iy >= 0 && ix < grid.length && iy < grid.length && grid[iy][ix].buildingType === BuildingType.Road;
+};
+
+// Start on the road nearest the map centre, facing along the road
+const findWalkSpawn = (grid: Grid) => {
+  const center = (grid.length - 1) / 2;
+  let best: { x: number; y: number } | null = null;
+  let bestDist = Infinity;
+  grid.forEach(row => row.forEach(tile => {
+    if (tile.buildingType !== BuildingType.Road) return;
+    const d = (tile.x - center) ** 2 + (tile.y - center) ** 2;
+    if (d < bestDist) { bestDist = d; best = { x: tile.x, y: tile.y }; }
+  }));
+  if (!best) return null;
+  const { x, y } = best;
+  // Yaw 0 looks toward -y; the forward vector is (-sin(yaw), -cos(yaw)) in grid space
+  const yaw = isRoad(grid, x + 1, y) ? -Math.PI / 2
+    : isRoad(grid, x - 1, y) ? Math.PI / 2
+    : isRoad(grid, x, y + 1) ? Math.PI
+    : 0;
+  return { x, y, yaw };
+};
+
+export interface WalkInput { forward: number; turn: number }
+
+interface WalkControllerProps {
+  grid: Grid;
+  touchInput: React.MutableRefObject<WalkInput>;
+}
+
+// First-person camera constrained to road tiles: WASD / arrows to move, drag to look, Shift to run.
+const WalkController = ({ grid, touchInput }: WalkControllerProps) => {
+  const cameraRef = useRef<THREE.PerspectiveCamera>(null);
+  const gl = useThree(state => state.gl);
+  const gridRef = useRef(grid);
+  useEffect(() => { gridRef.current = grid; }, [grid]);
+
+  const spawn = useMemo(() => findWalkSpawn(grid), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const pos = useRef({ x: spawn?.x ?? 0, y: spawn?.y ?? 0 });
+  const look = useRef({ yaw: spawn?.yaw ?? 0, pitch: 0 });
+  const keys = useRef(new Set<string>());
+  const bobTime = useRef(0);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      keys.current.add(e.key.toLowerCase());
+    };
+    const onKeyUp = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
+    const onBlur = () => keys.current.clear();
+
+    const el = gl.domElement;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    const onPointerDown = (e: PointerEvent) => {
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      el.setPointerCapture(e.pointerId);
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragging) return;
+      look.current.yaw -= (e.clientX - lastX) * LOOK_SENSITIVITY;
+      look.current.pitch = MathUtils.clamp(look.current.pitch - (e.clientY - lastY) * LOOK_SENSITIVITY, -MAX_PITCH, MAX_PITCH);
+      lastX = e.clientX;
+      lastY = e.clientY;
+    };
+    const onPointerUp = () => { dragging = false; };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    el.addEventListener('pointerdown', onPointerDown);
+    el.addEventListener('pointermove', onPointerMove);
+    el.addEventListener('pointerup', onPointerUp);
+    el.addEventListener('pointercancel', onPointerUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('pointermove', onPointerMove);
+      el.removeEventListener('pointerup', onPointerUp);
+      el.removeEventListener('pointercancel', onPointerUp);
+    };
+  }, [gl]);
+
+  useFrame((_, delta) => {
+    const cam = cameraRef.current;
+    if (!cam) return;
+    const k = keys.current;
+    const dt = Math.min(delta, 0.1);
+
+    const turn = (k.has('arrowleft') ? 1 : 0) - (k.has('arrowright') ? 1 : 0) + touchInput.current.turn;
+    look.current.yaw += turn * TURN_SPEED * dt;
+
+    const forward = (k.has('w') || k.has('arrowup') ? 1 : 0) - (k.has('s') || k.has('arrowdown') ? 1 : 0) + touchInput.current.forward;
+    const strafe = (k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0);
+
+    const { yaw } = look.current;
+    let mx = -Math.sin(yaw) * forward + Math.cos(yaw) * strafe;
+    let my = -Math.cos(yaw) * forward - Math.sin(yaw) * strafe;
+    const len = Math.hypot(mx, my);
+    const moving = len > 0.01;
+
+    if (moving) {
+      const speed = WALK_SPEED * (k.has('shift') ? RUN_MULTIPLIER : 1) * dt / Math.max(len, 1);
+      mx *= speed;
+      my *= speed;
+      const p = pos.current;
+      const g = gridRef.current;
+      // Move each axis separately so you slide along road edges instead of sticking
+      if (mx !== 0 && isRoad(g, p.x + mx + Math.sign(mx) * BODY_RADIUS, p.y)) p.x += mx;
+      if (my !== 0 && isRoad(g, p.x, p.y + my + Math.sign(my) * BODY_RADIUS)) p.y += my;
+      bobTime.current += dt * (k.has('shift') ? 14 : 9);
+    }
+
+    const bob = moving ? Math.sin(bobTime.current) * 0.008 : 0;
+    const [wx, , wz] = gridToWorld(pos.current.x, pos.current.y, gridRef.current.length);
+    cam.position.set(wx, ROAD_SURFACE_Y + EYE_HEIGHT + bob, wz);
+    cam.rotation.set(look.current.pitch, look.current.yaw, 0, 'YXZ');
+  });
+
+  return <PerspectiveCamera ref={cameraRef} makeDefault fov={70} near={0.01} far={200} />;
+};
+
+// Styled to match the toolbar's ToolButton: icon over a small uppercase label
+const CameraButton = ({ onClick, title, label, icon, active = false, disabled = false }: { onClick: () => void; title: string; label: string; icon: React.ReactNode; active?: boolean; disabled?: boolean }) => (
+  <button
+    onClick={onClick}
+    title={title}
+    aria-label={title}
+    aria-pressed={active}
+    disabled={disabled}
+    className={`
+      w-12 h-12 md:w-14 md:h-14 flex flex-col items-center justify-center gap-1 rounded-lg border-2 transition-all
+      focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60
+      ${active ? 'border-cyan-400 bg-cyan-500/20 text-cyan-100' : 'border-gray-600 bg-gray-900/80 text-gray-200'}
+      ${disabled ? 'opacity-40 cursor-not-allowed' : active ? 'hover:bg-cyan-500/30' : 'hover:bg-gray-800 hover:border-gray-500'}
+    `}
+  >
+    {icon}
+    <span className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider leading-none">{label}</span>
+  </button>
+);
+
+// Hold-to-move button for touch screens in walk view
+const HoldButton = ({ input, field, value, icon, title }: { input: React.MutableRefObject<WalkInput>; field: keyof WalkInput; value: number; icon: React.ReactNode; title: string }) => {
+  const release = () => { input.current[field] = 0; };
+  return (
+    <button
+      title={title}
+      aria-label={title}
+      onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); input.current[field] = value; }}
+      onPointerUp={release}
+      onPointerCancel={release}
+      onPointerLeave={release}
+      className="w-11 h-11 md:w-12 md:h-12 flex items-center justify-center rounded-lg border-2 border-gray-600 bg-gray-900/80 text-gray-200 hover:bg-gray-800 active:border-cyan-400 active:bg-cyan-500/20 active:text-cyan-100 transition-colors select-none touch-none"
+    >
+      {icon}
+    </button>
+  );
+};
+
+const Kbd = ({ children }: { children: React.ReactNode }) => (
+  <kbd className="px-1.5 py-0.5 rounded border border-gray-600 bg-gray-800 text-[10px] font-mono font-bold text-gray-100 leading-none">{children}</kbd>
+);
+
 interface IsoMapProps {
   grid: Grid;
   onTileClick: (x: number, y: number) => void;
@@ -670,6 +949,46 @@ interface IsoMapProps {
 
 const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, population }) => {
   const [hoveredTile, setHoveredTile] = useState<{x: number, y: number} | null>(null);
+  const [cameraView, setCameraView] = useState<CameraView>('3d');
+  const [rotateRequest, setRotateRequest] = useState({ id: 0, step: 0 });
+
+  const rotateView = useCallback((step: number) => {
+    setRotateRequest(prev => ({ id: prev.id + 1, step }));
+  }, []);
+
+  const toggleView = useCallback(() => {
+    setCameraView(v => (v === 'top' ? '3d' : 'top'));
+  }, []);
+
+  const [walking, setWalking] = useState(false);
+  const walkTouchInput = useRef<WalkInput>({ forward: 0, turn: 0 });
+  const hasRoads = useMemo(() => grid.some(row => row.some(t => t.buildingType === BuildingType.Road)), [grid]);
+
+  const toggleWalk = useCallback(() => {
+    walkTouchInput.current = { forward: 0, turn: 0 };
+    setHoveredTile(null);
+    setWalking(w => !w);
+  }, []);
+
+  // Leave walk view if the last road is removed
+  useEffect(() => {
+    if (walking && !hasRoads) setWalking(false);
+  }, [walking, hasRoads]);
+
+  // Keyboard shortcuts: Q / E rotate, T toggles top view, V toggles walk view, Esc exits walk view
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const key = e.key.toLowerCase();
+      if (key === 'v' && (walking || hasRoads)) toggleWalk();
+      else if (walking) { if (key === 'escape') toggleWalk(); }
+      else if (key === 'q') rotateView(ROTATE_STEP);
+      else if (key === 'e') rotateView(-ROTATE_STEP);
+      else if (key === 't') toggleView();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [rotateView, toggleView, toggleWalk, walking, hasRoads]);
 
   const handleHover = useCallback((x: number, y: number) => {
     setHoveredTile({ x, y });
@@ -679,27 +998,45 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
     setHoveredTile(null);
   }, []);
 
+  // Building placement is paused in walk view so drag-to-look doesn't place tiles
+  const noop = useCallback(() => {}, []);
+  const tileHover = walking ? noop : handleHover;
+  const tileLeave = walking ? noop : handleLeave;
+  const tileClick = walking ? noop : onTileClick;
+
   // Preview Logic
   const showPreview = hoveredTile && grid[hoveredTile.y][hoveredTile.x].buildingType === BuildingType.None && hoveredTool !== BuildingType.None;
   const previewColor = showPreview ? BUILDINGS[hoveredTool].color : 'white';
   const isBulldoze = hoveredTool === BuildingType.None;
   
-  const previewPos = hoveredTile ? gridToWorld(hoveredTile.x, hoveredTile.y) : [0,0,0];
+  const gridSize = grid.length;
+  // Shadow camera covers the whole island at any grid size
+  const shadowExtent = Math.max(15, gridSize / 2 + 2);
+
+  const previewPos = hoveredTile ? gridToWorld(hoveredTile.x, hoveredTile.y, gridSize) : [0,0,0];
 
   return (
     <div className="absolute inset-0 bg-sky-900 touch-none">
       <Canvas shadows dpr={[1, 1.5]} gl={{ antialias: true }}>
         <OrthographicCamera makeDefault zoom={45} position={[20, 20, 20]} near={-100} far={200} />
         
-        <MapControls 
-          enableRotate={true}
-          enableZoom={true}
-          minZoom={20}
-          maxZoom={120}
-          maxPolarAngle={Math.PI / 2.2}
-          minPolarAngle={0.1}
-          target={[0,-0.5,0]}
-        />
+        {walking ? (
+          <WalkController grid={grid} touchInput={walkTouchInput} />
+        ) : (
+          <>
+            <MapControls
+              makeDefault
+              enableRotate={true}
+              enableZoom={true}
+              minZoom={20}
+              maxZoom={120}
+              maxPolarAngle={Math.PI / 2.2}
+              minPolarAngle={0.1}
+              target={[0,-0.5,0]}
+            />
+            <CameraRig view={cameraView} rotateRequest={rotateRequest} />
+          </>
+        )}
 
         <ambientLight intensity={0.5} color="#cceeff" />
         <directionalLight
@@ -708,19 +1045,19 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
           intensity={2}
           color="#fffbeb"
           shadow-mapSize={[2048, 2048]}
-          shadow-camera-left={-15} shadow-camera-right={15}
-          shadow-camera-top={15} shadow-camera-bottom={-15}
+          shadow-camera-left={-shadowExtent} shadow-camera-right={shadowExtent}
+          shadow-camera-top={shadowExtent} shadow-camera-bottom={-shadowExtent}
         >
         </directionalLight>
         <Environment preset="city" />
 
-        <EnvironmentEffects />
+        <EnvironmentEffects size={gridSize} />
 
         <group>
           {grid.map((row, y) =>
             row.map((tile, x) => {
               // Calculate world position once per tile
-              const [wx, _, wz] = gridToWorld(x, y);
+              const [wx, _, wz] = gridToWorld(x, y, gridSize);
               
               return (
               <React.Fragment key={`${x}-${y}`}>
@@ -728,9 +1065,9 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
                     type={tile.buildingType} 
                     x={x} y={y} 
                     grid={grid}
-                    onHover={handleHover}
-                    onLeave={handleLeave}
-                    onClick={onTileClick}
+                    onHover={tileHover}
+                    onLeave={tileLeave}
+                    onClick={tileClick}
                 />
                 
                 {/* Building visual - apply world position to group to align with ground tile */}
@@ -773,6 +1110,7 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
               <Cursor 
                 x={hoveredTile.x} 
                 y={hoveredTile.y} 
+                size={gridSize}
                 color={isBulldoze ? '#ef4444' : (showPreview ? '#ffffff' : '#000000')} 
               />
             )}
@@ -781,6 +1119,53 @@ const IsoMap: React.FC<IsoMapProps> = ({ grid, onTileClick, hoveredTool, populat
         
         <SoftShadows size={10} samples={8} />
       </Canvas>
+
+      {/* Camera Controls */}
+      <div className="absolute right-2 md:right-4 top-1/2 -translate-y-1/2 z-20 flex flex-col gap-1.5 p-1.5 bg-gray-900/90 border border-gray-700 rounded-xl shadow-2xl backdrop-blur-md">
+        {walking ? (
+          <CameraButton onClick={toggleWalk} title="Exit walk view (Esc)" label="Exit" icon={<CloseIcon />} />
+        ) : (
+          <>
+            <CameraButton
+              onClick={toggleView}
+              title={cameraView === 'top' ? 'Switch to 3D view (T)' : 'Switch to top view (T)'}
+              label={cameraView === 'top' ? '3D' : 'Top'}
+              icon={cameraView === 'top' ? <PerspectiveIcon /> : <TopViewIcon />}
+            />
+            <CameraButton onClick={() => rotateView(ROTATE_STEP)} title="Rotate left (Q)" label="Left" icon={<RotateLeftIcon />} />
+            <CameraButton onClick={() => rotateView(-ROTATE_STEP)} title="Rotate right (E)" label="Right" icon={<RotateRightIcon />} />
+            <div className="h-px bg-gray-700 mx-1" />
+            <CameraButton
+              onClick={toggleWalk}
+              title={hasRoads ? 'Walk the streets (V)' : 'Build a road to walk the streets'}
+              label="Walk"
+              icon={<WalkIcon />}
+              disabled={!hasRoads}
+            />
+          </>
+        )}
+      </div>
+
+      {/* Walk View: hint + touch controls */}
+      {walking && (
+        <div className="absolute left-2 md:left-4 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2">
+          <div className="hidden md:flex flex-col gap-1.5 text-[10px] text-gray-300 bg-gray-900/90 border border-gray-700 rounded-xl px-3 py-2.5 shadow-2xl backdrop-blur-md">
+            <span className="text-[9px] text-gray-400 uppercase font-bold tracking-widest mb-0.5">Walk Controls</span>
+            <span className="flex items-center gap-1"><Kbd>W</Kbd><Kbd>A</Kbd><Kbd>S</Kbd><Kbd>D</Kbd><span className="ml-1">Move</span></span>
+            <span className="flex items-center gap-1"><Kbd>Shift</Kbd><span className="ml-1">Run</span></span>
+            <span className="flex items-center gap-1"><Kbd>Drag</Kbd><span className="ml-1">Look</span></span>
+            <span className="flex items-center gap-1"><Kbd>Esc</Kbd><span className="ml-1">Exit</span></span>
+          </div>
+          <div className="grid grid-cols-3 gap-1 p-1.5 bg-gray-900/90 border border-gray-700 rounded-xl shadow-2xl backdrop-blur-md">
+            <span />
+            <HoldButton input={walkTouchInput} field="forward" value={1} icon={<ChevronUpIcon className="w-5 h-5" />} title="Walk forward" />
+            <span />
+            <HoldButton input={walkTouchInput} field="turn" value={1} icon={<ChevronLeftIcon className="w-5 h-5" />} title="Turn left" />
+            <HoldButton input={walkTouchInput} field="forward" value={-1} icon={<ChevronDownIcon className="w-5 h-5" />} title="Walk back" />
+            <HoldButton input={walkTouchInput} field="turn" value={-1} icon={<ChevronRightIcon className="w-5 h-5" />} title="Turn right" />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

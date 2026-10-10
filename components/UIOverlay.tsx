@@ -5,6 +5,7 @@
 import React, { useEffect, useRef } from 'react';
 import { BuildingType, CityStats, AIGoal, NewsItem } from '../types';
 import { BUILDINGS } from '../constants';
+import { DownloadIcon } from './Icons';
 
 interface UIOverlayProps {
   stats: CityStats;
@@ -15,6 +16,7 @@ interface UIOverlayProps {
   onClaimReward: () => void;
   isGeneratingGoal: boolean;
   aiEnabled: boolean;
+  onSaveLayout: () => void;
 }
 
 const tools = [
@@ -71,7 +73,8 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
   newsFeed,
   onClaimReward,
   isGeneratingGoal,
-  aiEnabled
+  aiEnabled,
+  onSaveLayout
 }) => {
   const newsRef = useRef<HTMLDivElement>(null);
 
@@ -104,6 +107,16 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
              <span className="text-[8px] md:text-[10px] text-gray-400 uppercase font-bold tracking-widest">Day</span>
              <span className="text-base md:text-lg font-bold text-white font-mono">{stats.day}</span>
           </div>
+          <div className="w-px h-6 md:h-8 bg-gray-700"></div>
+          <button
+            onClick={onSaveLayout}
+            title="Download this city as a layout file (load it from the main menu)"
+            aria-label="Save layout"
+            className="flex flex-col items-center justify-center gap-1 w-10 h-10 md:w-12 md:h-12 text-gray-200 bg-gray-900/80 hover:bg-gray-800 border-2 border-gray-600 hover:border-gray-500 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+          >
+            <DownloadIcon className="w-4 h-4" />
+            <span className="text-[8px] md:text-[9px] font-bold uppercase tracking-wider leading-none">Save</span>
+          </button>
         </div>
 
         {/* AI Goal Panel */}

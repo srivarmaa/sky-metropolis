@@ -5,7 +5,7 @@
 import { BuildingConfig, BuildingType } from './types';
 
 // Map Settings
-export const GRID_SIZE = 50;
+export const GRID_SIZE = 10;
 
 // Game Settings
 export const TICK_RATE_MS = 2000; // Game loop updates every 2 seconds
