@@ -6,7 +6,10 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { AIGoal, BuildingType, CityStats, Grid, NewsItem } from "../types";
 import { BUILDINGS } from "../constants";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// AI features are optional: without a key the game runs with quests and news disabled.
+export const isAiAvailable = Boolean(process.env.API_KEY);
+
+const ai = isAiAvailable ? new GoogleGenAI({ apiKey: process.env.API_KEY }) : null;
 
 const modelId = 'gemini-2.5-flash';
 
@@ -43,7 +46,7 @@ const goalSchema = {
 };
 
 export const generateCityGoal = async (stats: CityStats, grid: Grid): Promise<AIGoal | null> => {
-  // @google/genai-api-key-fix: The API key must be obtained exclusively from the environment variable `process.env.API_KEY`. Do not add checks for its existence.
+  if (!ai) return null;
 
   // Count buildings
   const counts: Record<string, number> = {};
@@ -100,7 +103,7 @@ const newsSchema = {
 };
 
 export const generateNewsEvent = async (stats: CityStats, recentAction: string | null): Promise<NewsItem | null> => {
-  // @google/genai-api-key-fix: The API key must be obtained exclusively from the environment variable `process.env.API_KEY`. Do not add checks for its existence.
+  if (!ai) return null;
 
   const context = `City Stats - Pop: ${stats.population}, Money: ${stats.money}, Day: ${stats.day}. ${recentAction ? `Recent Action: ${recentAction}` : ''}`;
   const prompt = "Generate a very short, isometric-sim-city style news headline based on the city state. Can be funny, cynical, or celebratory.";

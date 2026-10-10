@@ -8,7 +8,7 @@ import { GRID_SIZE, BUILDINGS, TICK_RATE_MS, INITIAL_MONEY } from './constants';
 import IsoMap from './components/IsoMap';
 import UIOverlay from './components/UIOverlay';
 import StartScreen from './components/StartScreen';
-import { generateCityGoal, generateNewsEvent } from './services/geminiService';
+import { generateCityGoal, generateNewsEvent, isAiAvailable } from './services/geminiService';
 
 // Initialize empty grid with island shape generation for 3D visual interest
 const createInitialGrid = (): Grid => {
@@ -32,7 +32,7 @@ const createInitialGrid = (): Grid => {
 function App() {
   // --- Game State ---
   const [gameStarted, setGameStarted] = useState(false);
-  const [aiEnabled, setAiEnabled] = useState(true);
+  const [aiEnabled, setAiEnabled] = useState(isAiAvailable);
 
   const [grid, setGrid] = useState<Grid>(createInitialGrid);
   const [stats, setStats] = useState<CityStats>({ money: INITIAL_MONEY, population: 0, day: 1 });
@@ -92,7 +92,6 @@ function App() {
     addNewsItem({ id: Date.now().toString(), text: "Welcome to SkyMetropolis. Terrain generation complete.", type: 'positive' });
     
     if (aiEnabled) {
-      // @google/genai-api-key-fix: The API key's availability is a hard requirement and should not be checked in the UI.
       fetchNewGoal();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -236,7 +235,7 @@ function App() {
       
       {/* Start Screen Overlay */}
       {!gameStarted && (
-        <StartScreen onStart={handleStart} />
+        <StartScreen onStart={handleStart} aiAvailable={isAiAvailable} />
       )}
 
       {/* UI Layer */}

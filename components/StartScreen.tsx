@@ -6,10 +6,11 @@ import React, { useState } from 'react';
 
 interface StartScreenProps {
   onStart: (aiEnabled: boolean) => void;
+  aiAvailable: boolean;
 }
 
-const StartScreen: React.FC<StartScreenProps> = ({ onStart }) => {
-  const [aiEnabled, setAiEnabled] = useState(true);
+const StartScreen: React.FC<StartScreenProps> = ({ onStart, aiAvailable }) => {
+  const [aiEnabled, setAiEnabled] = useState(aiAvailable);
 
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center z-50 text-white font-sans p-6 bg-black/30 backdrop-blur-sm transition-all duration-1000">
@@ -27,14 +28,14 @@ const StartScreen: React.FC<StartScreenProps> = ({ onStart }) => {
             </p>
 
             <div className="bg-slate-800/50 p-5 rounded-xl border border-slate-700/50 mb-8 hover:border-slate-600 transition-colors shadow-inner">
-            <label className="flex items-center justify-between cursor-pointer group">
+            <label className={`flex items-center justify-between group ${aiAvailable ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}>
                 <div className="flex flex-col gap-1">
                 <span className="font-bold text-base text-slate-200 group-hover:text-white transition-colors flex items-center gap-2">
                     AI City Advisor
                     {aiEnabled && <span className="flex h-2 w-2 rounded-full bg-cyan-400 animate-pulse"></span>}
                 </span>
                 <span className="text-xs text-slate-500 group-hover:text-slate-400 transition-colors">
-                    Enable dynamic quests & news events via Gemini API
+                    {aiAvailable ? 'Enable dynamic quests & news events via Gemini API' : 'Unavailable — no Gemini API key configured'}
                 </span>
                 </div>
                 
@@ -43,6 +44,7 @@ const StartScreen: React.FC<StartScreenProps> = ({ onStart }) => {
                     type="checkbox" 
                     className="sr-only peer"
                     checked={aiEnabled}
+                    disabled={!aiAvailable}
                     onChange={(e) => setAiEnabled(e.target.checked)}
                 />
                 <div className="w-11 h-6 bg-slate-700 rounded-full peer peer-focus:ring-2 peer-focus:ring-cyan-500/40 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600 peer-checked:after:bg-white"></div>
@@ -51,7 +53,7 @@ const StartScreen: React.FC<StartScreenProps> = ({ onStart }) => {
             </div>
 
             <button 
-            onClick={() => onStart(aiEnabled)}
+            onClick={() => onStart(aiAvailable && aiEnabled)}
             className="w-full py-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg shadow-cyan-900/20 transform transition-all hover:scale-[1.02] active:scale-[0.98] text-lg tracking-wide"
             >
             Start Building
